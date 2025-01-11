@@ -113,6 +113,10 @@ int main ( int argc, char** argv )
     DataloaderBF loader = DataloaderBF();
     loader.loadImages(argv[1], 10); // argv[1] contains the setname, might be generalized to a path in the future
 
+    for (int i = 0; i < loader.nImages; i++){
+        cout << "Camera Pose:\n" << loader.cameraPose[i].at<double>(0,0) << endl << loader.cameraPose[i] << endl << endl;
+    }
+
     vector<Mat> grays;
     for(int i = 0; i < loader.nImages; i++){
         Mat gray;
@@ -268,11 +272,11 @@ int main ( int argc, char** argv )
 
 
     // Intrinsics of Info.txt file in BundleFusion Dataaset
-    Mat K4 = Mat(4, 4, CV_64FC1, &loader.info.calibrationColorIntrinsic);
+    Mat K4 = Mat(4, 4, DataType<double>::type, &loader.info.calibrationColorIntrinsic);
     cout << "Done with K4, first element: " << K4.at<double>(0,0) << endl;
     //Mat K = (Mat_<double>(3, 3) << 582.871, 0, 320, 0, 582.871, 240, 0, 0, 1);
     Mat K = K4(Range(0, 3), Range(0, 3));
-    cout << "Done with K, first element: " << K.at<double>(0,1) << endl;
+    cout << "Done with K (size " << K.size() << "), first element: " << K.at<double>(0,0) << endl;
 
     //-- Step 6: // Compute the Fundamental and Essential Matrix using the 8-point algorithm
     Mat F = findFundamentalMat(points1, points2, FM_8POINT);
@@ -308,7 +312,7 @@ int main ( int argc, char** argv )
                                                           R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1),
                                                           R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2)),
                         points1, points2, points4D);
-
+                        //image_1_goodmatches, image_2_goodmatches, points4D); 
 
 
 
