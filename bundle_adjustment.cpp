@@ -63,9 +63,10 @@ struct ReprojectionError {
         // Transform the 3D point into the camera coordinate system
         T p[3];
         ceres::AngleAxisRotatePoint(rotation, point, p);
-        p[0] += translation[0];
-        p[1] += translation[1];
-        p[2] += translation[2];
+        // cout<<"---------------inside ceres rotated points are "<<p[0]<<" "<<p[1]<<" "<<p[2]<<"\n";
+        p[0] -= translation[0];
+        p[1] -= translation[1];
+        p[2] -= translation[2];
 
         T result[3]; 
         for (int i = 0; i < 3; ++i) {
@@ -74,7 +75,8 @@ struct ReprojectionError {
                 result[i] += K[i * 3 + j] * point[j];
             }
         }
-
+        // cout<<"---------------inside ceres result[0] size is "<<sizeof(result[0])<<"\n";
+        // cout<<"---------------inside ceres result points are "<<result[0]<<" "<<result[1]<<" "<<result[2]<<"\n";
         // Project the 3D point into the image plane
         T x_image = result[0]/result[2];
         T y_image = result[1]/result[2];
@@ -193,7 +195,7 @@ int main ( int argc, char** argv )
     int num_points_added = 0;
     int index = 0;
 
-    while (num_points_added<8) { 
+    while (num_points_added < 8) { 
 
         // int random_index = rand() % 20;
         const auto& match = good_matches[index];
@@ -294,12 +296,23 @@ int main ( int argc, char** argv )
 
 
 
+    // Vectors to hold matching points
+    vector<Point2f> all_points_1, all_points_2;
+
+    // Iterate through matches and extract corresponding points
+    for (const auto& match : good_matches) {
+        all_points_1.push_back(keypoints_1[match.queryIdx].pt); // Point from keypoints1
+        all_points_2.push_back(keypoints_2[match.trainIdx].pt); // Point from keypoints2
+    }
+
+
+
     //-- Step 8: Generate 3D points via triangulation
     Mat points4D;
     triangulatePoints(K * Mat::eye(3, 4, CV_64F), K * (Mat_<double>(3, 4) << R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0),
                                                           R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1),
                                                           R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2)),
-                        points1, points2, points4D);
+                        all_points_1, all_points_2, points4D);
 
 
 
@@ -326,7 +339,15 @@ int main ( int argc, char** argv )
 
 
     // Initialize camera parameters for Ceres (rotation in angle-axis + translation)
-    double camera_params[6] = {angle_axis[0], angle_axis[1], angle_axis[2], t.at<double>(0), t.at<double>(1), t.at<double>(2)};
+    // double camera_params[6] = {angle_axis[0], angle_axis[1], angle_axis[2], t.at<double>(0), t.at<double>(1), t.at<double>(2)};
+    double* camera_params = new double[6]; // Dynamically allocate memory for 6 elements
+
+    camera_params[0] = angle_axis[0];
+    camera_params[1] = angle_axis[1];
+    camera_params[2] = angle_axis[2];
+    camera_params[3] = t.at<double>(0);
+    camera_params[4] = t.at<double>(1);
+    camera_params[5] = t.at<double>(2);
 
     double K_array[9];
     for (int i = 0; i < K.rows; ++i) {
@@ -341,18 +362,23 @@ int main ( int argc, char** argv )
     */
     ceres::Problem problem;
 
-    for (size_t i = 0; i < points1.size(); i++) {
+    for (size_t i = 0; i < points3D.size(); i++) {
 
         ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionError, 2, 6, 3>(
-            new ReprojectionError(points1[i].x, points1[i].y, K_array));
+            new ReprojectionError(all_points_1[i].x, all_points_2[i].y, K_array));
 
-        double point_3d[3] = {points3D[i].x, points3D[i].y, points3D[i].z};
+        // double point_3d[3] = {points3D[i].x, points3D[i].y, points3D[i].z};
+        double *point_3d = new double[3];
+        point_3d[0] = points3D[i].x;
+        point_3d[1] = points3D[i].y;
+        point_3d[2] = points3D[i].z;
+
         problem.AddResidualBlock(cost_function, nullptr, camera_params, point_3d);
     }
 
     // Configure solver
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_QR;
+    options.linear_solver_type = ceres::DENSE_SCHUR;
     options.minimizer_progress_to_stdout = true;
 
     ceres::Solver::Summary summary;
@@ -360,8 +386,8 @@ int main ( int argc, char** argv )
 
     // Output results
     cout << "Final Camera Parameters: ";
-    for (double param : camera_params) {
-        cout << param << " ";
+    for (int i=0; i<6; i++) {
+        cout << camera_params[i] << " ";
     }
     cout << endl;
 
