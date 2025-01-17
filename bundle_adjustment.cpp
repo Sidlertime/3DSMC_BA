@@ -10,6 +10,8 @@
 #include <math.h>
 #include <cmath>
 
+#include "dataloader_bf.hpp"
+
 using namespace std;
 using namespace cv;
 
@@ -107,46 +109,53 @@ double calculateL2Distance(const Point2f& point1, const Point2f& point2) {
 
 int main ( int argc, char** argv )
 {
+    google::InitGoogleLogging(argv[0]);
 
+    //put images into ../Data/Bundle Fusion/<setName> where setName is i.e. office3
+    DataloaderBF loader = DataloaderBF();
+    loader.loadImages(argv[1], 10); // argv[1] contains the setname, might be generalized to a path in the future
 
-    //put images into 1 directory level above build folder
-    //TODO: Automate reading of all images from directory
-    Mat img_1 = imread ("../frame-000000.color.jpg", IMREAD_COLOR );
-    Mat img_2 = imread ("../frame-000001.color.jpg", IMREAD_COLOR );
+    for (int i = 0; i < loader.nImages; i++){
+        cout << "Camera Pose:\n" << loader.cameraPose[i].at<double>(0,0) << endl << loader.cameraPose[i] << endl << endl;
+    }
 
-
-
-
-    Mat gray1, gray2;
-    cvtColor(img_1, gray1, COLOR_BGR2GRAY);
-    cvtColor(img_2, gray2, COLOR_BGR2GRAY);
+    vector<Mat> grays;
+    for(int i = 0; i < loader.nImages; i++){
+        Mat gray;
+        cvtColor(loader.imagesColor[i], gray, COLOR_BGR2GRAY);
+        grays.push_back(gray);
+    }
 
     // SIFT feature detection
     Ptr<SIFT> sift = SIFT::create();
-    vector<KeyPoint> keypoints_1, keypoints_2;
-    Mat descriptors_1, descriptors_2;
 
-    sift->detectAndCompute(gray1, noArray(), keypoints_1, descriptors_1);
-    sift->detectAndCompute(gray2, noArray(), keypoints_2, descriptors_2);
+    vector<vector<KeyPoint>> keypoints;
+    vector<Mat> descriptors;
+    for(int i = 0; i < loader.nImages; i++){
+        vector<KeyPoint> kp;
+        Mat dc;
+        sift->detectAndCompute(grays[i], noArray(), kp, dc);
 
-    // Ensure descriptors are CV_32F
-    if (descriptors_1.type() != CV_32F) {
-        descriptors_1.convertTo(descriptors_1, CV_32F);
-    }
-    if (descriptors_2.type() != CV_32F) {
-        descriptors_2.convertTo(descriptors_2, CV_32F);
+        // Ensure descriptors are CV_32F
+        if(dc.type() != CV_32F){
+            dc.convertTo(dc, CV_32F);
+        }
+
+        keypoints.push_back(kp);
+        descriptors.push_back(dc);
     }
 
 
     Mat outimg1;
-    drawKeypoints( img_1, keypoints_1, outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
+    //drawKeypoints( img_1, keypoints_1, outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
+    drawKeypoints( loader.imagesColor[0], keypoints[0], outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
     imshow("SIFT_Keypoints",outimg1);
 
     // Feature matching
     BFMatcher matcher(NORM_L2);
     vector<DMatch> matches;
-    matcher.match(descriptors_1, descriptors_2, matches);
-
+    //matcher.match(descriptors_1, descriptors_2, matches);
+    matcher.match(descriptors[0], descriptors[1], matches);
 
 
 
@@ -154,7 +163,7 @@ int main ( int argc, char** argv )
     double min_dist=10000, max_dist=0;
 
     //Find the minimum distance and maximum distance between all matches, that is, the distance between the most similar and the least similar two sets of points
-    for ( int i = 0; i < descriptors_1.rows; i++ )
+    for ( int i = 0; i < descriptors[0].rows; i++ )
     {
         double dist = matches[i].distance;
         if ( dist < min_dist ) min_dist = dist;
@@ -166,7 +175,7 @@ int main ( int argc, char** argv )
 
     //When the distance between descriptors is greater than twice the minimum distance, the matching is considered incorrect. But sometimes the minimum distance will be very small, and an empirical value of 30 is set as the lower limit.
     vector< DMatch > good_matches;
-    for ( int i = 0; i < descriptors_1.rows; i++ )
+    for ( int i = 0; i < descriptors[0].rows; i++ )
     {
         if ( matches[i].distance <= max ( 2*min_dist, 30.0 ) )
         {
@@ -179,8 +188,8 @@ int main ( int argc, char** argv )
     //-- Step 5: Draw matching results
     Mat img_match;
     Mat img_goodmatch;
-    drawMatches ( img_1, keypoints_1, img_2, keypoints_2, matches, img_match );
-    drawMatches ( img_1, keypoints_1, img_2, keypoints_2, good_matches, img_goodmatch );
+    drawMatches ( loader.imagesColor[0], keypoints[0], loader.imagesColor[1], keypoints[1], matches, img_match );
+    drawMatches ( loader.imagesColor[0], keypoints[0], loader.imagesColor[1], keypoints[1], good_matches, img_goodmatch );
     imshow ( "Match", img_match );
     imshow ( "Good_Match", img_goodmatch );
     waitKey(0);
@@ -202,8 +211,8 @@ int main ( int argc, char** argv )
         index++;
 
         // Get the keypoints from the match
-        const KeyPoint& kp1 = keypoints_1[match.queryIdx];
-        const KeyPoint& kp2 = keypoints_2[match.trainIdx];
+        const KeyPoint& kp1 = keypoints[0][match.queryIdx];
+        const KeyPoint& kp2 = keypoints[0][match.trainIdx];
 
         // points1.push_back(kp1.pt);
         // points2.push_back(kp2.pt);
@@ -240,33 +249,36 @@ int main ( int argc, char** argv )
     // Draw points and numbers on image1
     for (size_t i = 0; i < points1.size(); ++i) {
         // Draw point
-        circle(img_1, points1[i], 5, Scalar(0, 0, 255), -1); // Red dot
+        circle(loader.imagesColor[0], points1[i], 5, Scalar(0, 0, 255), -1); // Red dot
 
         // Add number label
-        putText(img_1, to_string(i + 1), points1[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+        putText(loader.imagesColor[0], to_string(i + 1), points1[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
     }
 
     // Draw points and numbers on image2
     for (size_t i = 0; i < points2.size(); ++i) {
         // Draw point
-        circle(img_2, points2[i], 5, Scalar(255, 0, 0), -1); // Blue dot
+        circle(loader.imagesColor[1], points2[i], 5, Scalar(255, 0, 0), -1); // Blue dot
 
         // Add number label
-        putText(img_2, to_string(i + 1), points2[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+        putText(loader.imagesColor[1], to_string(i + 1), points2[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
     }
 
     // Display the images
-    imshow("Image 1 with Points", img_1);
-    imshow("Image 2 with Points", img_2);
+    imshow("Image 1 with Points", loader.imagesColor[0]);
+    imshow("Image 2 with Points", loader.imagesColor[1]);
 
     // Wait for a key press and save the images if needed
     waitKey(0);
 
 
 
-    //hard coded from info.txt file in BundleFusion Dataaset
-    //TODO: automate reading of intrinsics from the info.txt file
-    Mat K = (Mat_<double>(3, 3) << 582.871, 0, 320, 0, 582.871, 240, 0, 0, 1);
+    // Intrinsics of Info.txt file in BundleFusion Dataaset
+    Mat K4 = Mat(4, 4, DataType<double>::type, &loader.info.calibrationColorIntrinsic);
+    cout << "Done with K4, first element: " << K4.at<double>(0,0) << endl;
+    //Mat K = (Mat_<double>(3, 3) << 582.871, 0, 320, 0, 582.871, 240, 0, 0, 1);
+    Mat K = K4(Range(0, 3), Range(0, 3));
+    cout << "Done with K (size " << K.size() << "), first element: " << K.at<double>(0,0) << endl;
 
     //-- Step 6: // Compute the Fundamental and Essential Matrix using the 8-point algorithm
     Mat F = findFundamentalMat(points1, points2, FM_8POINT);
@@ -301,8 +313,8 @@ int main ( int argc, char** argv )
 
     // Iterate through matches and extract corresponding points
     for (const auto& match : good_matches) {
-        all_points_1.push_back(keypoints_1[match.queryIdx].pt); // Point from keypoints1
-        all_points_2.push_back(keypoints_2[match.trainIdx].pt); // Point from keypoints2
+        all_points_1.push_back(keypoints[0][match.queryIdx].pt); // Point from keypoints1
+        all_points_2.push_back(keypoints[1][match.trainIdx].pt); // Point from keypoints2
     }
 
 
@@ -312,7 +324,7 @@ int main ( int argc, char** argv )
     triangulatePoints(K * Mat::eye(3, 4, CV_64F), K * (Mat_<double>(3, 4) << R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0),
                                                           R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1),
                                                           R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2)),
-                        all_points_1, all_points_2, points4D);
+                                                          all_points_1, all_points_2, points4D);
 
 
 
