@@ -11,10 +11,12 @@
 #include <cmath>
 
 #include "dataloader_bf.hpp"
+#include "mesh_utils.hpp"
 
 using namespace std;
 using namespace cv;
 
+#define DEBUG 0
 
 
 // struct ReprojectionError {
@@ -107,21 +109,44 @@ double calculateL2Distance(const Point2f& point1, const Point2f& point2) {
     return sqrt(dx * dx + dy * dy);
 }
 
+// Get ground truth position for a given image point
+inline Point3f groundTruthPoint(Point2f& point, Mat& depthMap, int depthShift, Mat& depthIntrinsicInv, Mat& trajectoryInv){
+    double z = double(depthMap.at<unsigned short>(point.x, point.y)) / double(depthShift);
+    if (z == 0.0) return Point3f(0.f,0.f,0.f);
+    Mat pos(trajectoryInv * depthIntrinsicInv * Vec4d(double(point.x) * z, double(point.y) * z, z, 1.0));
+    return Point3f(pos.at<double>(0), pos.at<double>(1), pos.at<double>(2));
+}
+
 int main ( int argc, char** argv )
 {
     google::InitGoogleLogging(argv[0]);
 
+    string setName = "apt0";
+    int imgSize = 10;
+    int every = 1;
+    if(argc > 1) setName = argv[1];
+    if(argc > 2) imgSize = atoi(argv[2]);
+    if(argc > 3) every = atoi(argv[3]);
+
     //put images into ../Data/Bundle Fusion/<setName> where setName is i.e. office3
     DataloaderBF loader = DataloaderBF();
-    loader.loadImages(argv[1], 10); // argv[1] contains the setname, might be generalized to a path in the future
+    loader.loadImages(setName, imgSize, every); // argv[1] contains the setname, might be generalized to a path in the future
+    cout << "Color intr\n" << loader.getColorIntrinsic() << endl;
+    cout << "Depth intr\n" << loader.getDepthIntrinsic() << endl;
+    cout << "Depth inverted:\n" << loader.getDepthIntrinsic().inv() << endl;
 
-    for (int i = 0; i < loader.nImages; i++){
-        cout << "Camera Pose:\n" << loader.cameraPose[i].at<double>(0,0) << endl << loader.cameraPose[i] << endl << endl;
+    if (DEBUG){
+        imshow("Colorimage", loader.imagesColor[0]);
+        imshow("Depthimage", loader.imagesDepth[0]);
+
+        for (int i = 0; i < loader.nImages; i++){
+            cout << "Camera Pose of frame " << i << ":\n" << loader.cameraPose[i] << endl << endl;
+        }
     }
 
     vector<Mat> grays;
     for(int i = 0; i < loader.nImages; i++){
-        Mat gray;
+        Mat gray = Mat();
         cvtColor(loader.imagesColor[i], gray, COLOR_BGR2GRAY);
         grays.push_back(gray);
     }
@@ -132,9 +157,10 @@ int main ( int argc, char** argv )
     vector<vector<KeyPoint>> keypoints;
     vector<Mat> descriptors;
     for(int i = 0; i < loader.nImages; i++){
-        vector<KeyPoint> kp;
-        Mat dc;
+        vector<KeyPoint> kp = vector<KeyPoint>();
+        Mat dc = Mat();
         sift->detectAndCompute(grays[i], noArray(), kp, dc);
+        sift->clear();
 
         // Ensure descriptors are CV_32F
         if(dc.type() != CV_32F){
@@ -145,273 +171,359 @@ int main ( int argc, char** argv )
         descriptors.push_back(dc);
     }
 
+    cout << "Finished calculating all SIFT keypoints and descriptors" << endl;
 
-    Mat outimg1;
-    //drawKeypoints( img_1, keypoints_1, outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
-    drawKeypoints( loader.imagesColor[0], keypoints[0], outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
-    imshow("SIFT_Keypoints",outimg1);
 
-    // Feature matching
+    if(DEBUG){
+        Mat outimg1;
+        drawKeypoints( loader.imagesColor[0], keypoints[0], outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
+        imshow("SIFT_Keypoints",outimg1);
+    }
+
+    Mat globalRotation = Mat::eye(4, 4, DataType<double>::type);
+    vector<Point3f> allPoints;
+    vector<Point3f> cameras;
+    cameras.push_back(Point3f(0, 0, 0));
+
+    vector<Vertex> all_points_ground_truth;
+    all_points_ground_truth.push_back(Vertex(Point3f(0,0,0),Vec3b(255,0,0)));
+    Mat depthInv = loader.getDepthIntrinsic().inv();
+
     BFMatcher matcher(NORM_L2);
     vector<DMatch> matches;
-    //matcher.match(descriptors_1, descriptors_2, matches);
-    matcher.match(descriptors[0], descriptors[1], matches);
+    for (int n = 0; n < loader.nImages - 1; n++){
+        // Feature matching
+        matches.clear();
+        matcher.match(descriptors[n], descriptors[n + 1], matches);
 
 
+        // -- Step 4: Filter matching point pairs
+        double min_dist=10000, max_dist=0;
 
-   //-- Step 4: Filter matching point pairs
-    double min_dist=10000, max_dist=0;
-
-    //Find the minimum distance and maximum distance between all matches, that is, the distance between the most similar and the least similar two sets of points
-    for ( int i = 0; i < descriptors[0].rows; i++ )
-    {
-        double dist = matches[i].distance;
-        if ( dist < min_dist ) min_dist = dist;
-        if ( dist > max_dist ) max_dist = dist;
-    }
-
-    printf ( "-- Max dist : %f \n", max_dist );
-    printf ( "-- Min dist : %f \n", min_dist );
-
-    //When the distance between descriptors is greater than twice the minimum distance, the matching is considered incorrect. But sometimes the minimum distance will be very small, and an empirical value of 30 is set as the lower limit.
-    vector< DMatch > good_matches;
-    for ( int i = 0; i < descriptors[0].rows; i++ )
-    {
-        if ( matches[i].distance <= max ( 2*min_dist, 30.0 ) )
+        // Find the minimum distance and maximum distance between all matches, that is, the distance between the most similar and the least similar two sets of points
+        for ( int i = 0; i < descriptors[n].rows; i++ )
         {
-            good_matches.push_back ( matches[i] );
+            double dist = matches[i].distance;
+            if ( dist < min_dist ) min_dist = dist;
+            if ( dist > max_dist ) max_dist = dist;
         }
-    }
 
-    cout<<"Number of good matches are "<<good_matches.size()<<endl;
+        if(DEBUG) printf("-- Max dist : %f \n", max_dist);
+        if(DEBUG) printf("-- Min dist : %f \n", min_dist);
 
-    //-- Step 5: Draw matching results
-    Mat img_match;
-    Mat img_goodmatch;
-    drawMatches ( loader.imagesColor[0], keypoints[0], loader.imagesColor[1], keypoints[1], matches, img_match );
-    drawMatches ( loader.imagesColor[0], keypoints[0], loader.imagesColor[1], keypoints[1], good_matches, img_goodmatch );
-    imshow ( "Match", img_match );
-    imshow ( "Good_Match", img_goodmatch );
-    waitKey(0);
-
-
-    sort(good_matches.begin(), good_matches.end(), [](const DMatch &a, const DMatch &b) {
-    return a.distance < b.distance;
-    });
-
-    vector<Point2f> points1, points2;
-
-    int num_points_added = 0;
-    int index = 0;
-
-    while (num_points_added < 8) { 
-
-        // int random_index = rand() % 20;
-        const auto& match = good_matches[index];
-        index++;
-
-        // Get the keypoints from the match
-        const KeyPoint& kp1 = keypoints[0][match.queryIdx];
-        const KeyPoint& kp2 = keypoints[0][match.trainIdx];
-
-        // points1.push_back(kp1.pt);
-        // points2.push_back(kp2.pt);
-
-        // // Print the coordinates of the matched keypoints
-        // cout << "Match " << i << ":\n";
-        // cout << "  Keypoint from Image 1: (" << kp1.pt.x << ", " << kp1.pt.y << ")\n";
-        // cout << "  Keypoint from Image 2: (" << kp2.pt.x << ", " << kp2.pt.y << ")\n";
-    
-
-        bool isFarEnough = true;
-        for (const auto& addedPoint : points1) {
-            if (calculateL2Distance(addedPoint, kp1.pt) <= 10.0) {
-                isFarEnough = false;
-                break;
+        // When the distance between descriptors is greater than twice the minimum distance, the matching is considered incorrect. But sometimes the minimum distance will be very small, and an empirical value of 30 is set as the lower limit.
+        vector< DMatch > good_matches;
+        for (int i = 0; i < descriptors[n + 1].rows; i++)
+        {
+            if (matches[i].distance <= max(2 * min_dist, 30.0))
+            {
+                good_matches.push_back(matches[i]);
             }
         }
 
-        // Add keypoints only if far enough
-        if (isFarEnough) {
-            points1.push_back(kp1.pt);
-            points2.push_back(kp2.pt);
-
-            // Print the coordinates of the matched keypoints
-            std::cout << "Match " << index << ":\n";
-            std::cout << "  Keypoint from Image 1: (" << kp1.pt.x << ", " << kp1.pt.y << ")\n";
-            std::cout << "  Keypoint from Image 2: (" << kp2.pt.x << ", " << kp2.pt.y << ")\n";
-
-            num_points_added++;
+        cout << "Number of good matches are " << good_matches.size() << endl;
+        if (good_matches.size() < 8){
+            cout << "Not enough Points for matching" << endl;
+            continue;
         }
-   
-    }
 
-    // Draw points and numbers on image1
-    for (size_t i = 0; i < points1.size(); ++i) {
-        // Draw point
-        circle(loader.imagesColor[0], points1[i], 5, Scalar(0, 0, 255), -1); // Red dot
-
-        // Add number label
-        putText(loader.imagesColor[0], to_string(i + 1), points1[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
-    }
-
-    // Draw points and numbers on image2
-    for (size_t i = 0; i < points2.size(); ++i) {
-        // Draw point
-        circle(loader.imagesColor[1], points2[i], 5, Scalar(255, 0, 0), -1); // Blue dot
-
-        // Add number label
-        putText(loader.imagesColor[1], to_string(i + 1), points2[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
-    }
-
-    // Display the images
-    imshow("Image 1 with Points", loader.imagesColor[0]);
-    imshow("Image 2 with Points", loader.imagesColor[1]);
-
-    // Wait for a key press and save the images if needed
-    waitKey(0);
-
-
-
-    // Intrinsics of Info.txt file in BundleFusion Dataaset
-    Mat K4 = Mat(4, 4, DataType<double>::type, &loader.info.calibrationColorIntrinsic);
-    cout << "Done with K4, first element: " << K4.at<double>(0,0) << endl;
-    //Mat K = (Mat_<double>(3, 3) << 582.871, 0, 320, 0, 582.871, 240, 0, 0, 1);
-    Mat K = K4(Range(0, 3), Range(0, 3));
-    cout << "Done with K (size " << K.size() << "), first element: " << K.at<double>(0,0) << endl;
-
-    //-- Step 6: // Compute the Fundamental and Essential Matrix using the 8-point algorithm
-    Mat F = findFundamentalMat(points1, points2, FM_8POINT);
-
-    cout << "Fundamental Matrix:\n" << F << endl;
-
-    // Compute the Essential Matrix: E = K'^T * F * K
-    Mat E = K.t() * F * K;
-
-    cout << "Essential Matrix:\n" << E << endl;
-
-    // // Decompose the Essential Matrix into R and t
-    // Mat R1, R2, t;
-    // decomposeEssentialMat(E, R1, R2, t);
-
-    // // Output the results
-    // cout << "Rotation Matrix R1:\n" << R1 << endl;
-    // cout << "Rotation Matrix R2:\n" << R2 << endl;
-    // cout << "Translation Vector t:\n" << t << endl;
-
-    //-- Step 7: Recover pose (R, t)
-    Mat R, t;
-    recoverPose(E, points1, points2, K, R, t);
-
-    cout << "Rotation Matrix R:\n" << R << endl;
-    cout << "Translation Vector t:\n" << t << endl;
-
-
-
-    // Vectors to hold matching points
-    vector<Point2f> all_points_1, all_points_2;
-
-    // Iterate through matches and extract corresponding points
-    for (const auto& match : good_matches) {
-        all_points_1.push_back(keypoints[0][match.queryIdx].pt); // Point from keypoints1
-        all_points_2.push_back(keypoints[1][match.trainIdx].pt); // Point from keypoints2
-    }
-
-
-
-    //-- Step 8: Generate 3D points via triangulation
-    Mat points4D;
-    triangulatePoints(K * Mat::eye(3, 4, CV_64F), K * (Mat_<double>(3, 4) << R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0),
-                                                          R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1),
-                                                          R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2)),
-                                                          all_points_1, all_points_2, points4D);
-
-
-
-
-    // Convert points to homogeneous coordinates
-    vector<Point3f> points3D;
-    for (int i = 0; i < points4D.cols; i++) {
-        Point3f pt(points4D.at<float>(0, i) / points4D.at<float>(3, i),
-                       points4D.at<float>(1, i) / points4D.at<float>(3, i),
-                       points4D.at<float>(2, i) / points4D.at<float>(3, i));
-        points3D.push_back(pt);
-    }
-
-
-    // Create a double array to store the matrix data
-    double rotation_params[9] = {R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2),
-                                R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2),
-                                R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2)};
-
-    double angle_axis[3];
-
-    // Convert the rotation matrix to angle-axis
-    ceres::RotationMatrixToAngleAxis(rotation_params, angle_axis);
-
-
-    // Initialize camera parameters for Ceres (rotation in angle-axis + translation)
-    // double camera_params[6] = {angle_axis[0], angle_axis[1], angle_axis[2], t.at<double>(0), t.at<double>(1), t.at<double>(2)};
-    double* camera_params = new double[6]; // Dynamically allocate memory for 6 elements
-
-    camera_params[0] = angle_axis[0];
-    camera_params[1] = angle_axis[1];
-    camera_params[2] = angle_axis[2];
-    camera_params[3] = t.at<double>(0);
-    camera_params[4] = t.at<double>(1);
-    camera_params[5] = t.at<double>(2);
-
-    double K_array[9];
-    for (int i = 0; i < K.rows; ++i) {
-        for (int j = 0; j < K.cols; ++j) {
-            K_array[i * K.cols + j] = K.at<double>(i, j);
+        // -- Step 5: Draw matching results
+        if(DEBUG){
+            Mat img_match;
+            Mat img_goodmatch;
+            drawMatches(loader.imagesColor[n], keypoints[n], loader.imagesColor[n + 1], keypoints[n + 1], matches, img_match);
+            drawMatches(loader.imagesColor[n], keypoints[n], loader.imagesColor[n + 1], keypoints[n + 1], good_matches, img_goodmatch);
+            imshow("Match", img_match);
+            imshow("Good_Match", img_goodmatch);
+            waitKey(0);
         }
+
+
+        sort(good_matches.begin(), good_matches.end(), [](const DMatch &a, const DMatch &b) {
+            return a.distance < b.distance;
+        });
+
+        vector<Point2f> points1, points2;
+
+        int num_points_added = 0;
+        int index = 0;
+
+        while (num_points_added < 8) { 
+            if(index >= good_matches.size()) {
+                cout << "Failed to find 8 Points for 8-Point-Algorithm" << endl;
+                break;
+            }
+            // int random_index = rand() % 20;
+            const auto& match = good_matches[index];
+            index++;
+
+            // Get the keypoints from the match
+            if(match.queryIdx >= keypoints[n].size() || match.trainIdx >= keypoints[n + 1].size()) {
+                cout << "Match too large: " << match.queryIdx << ", " << match.trainIdx << endl;
+                continue;
+            }
+
+            const KeyPoint& kp1 = keypoints[n][match.queryIdx];
+            const KeyPoint& kp2 = keypoints[n + 1][match.trainIdx];
+
+            //points1.push_back(kp1.pt);
+            //points2.push_back(kp2.pt);
+
+            // // Print the coordinates of the matched keypoints
+            // cout << "Match " << i << ":\n";
+            // cout << "  Keypoint from Image 1: (" << kp1.pt.x << ", " << kp1.pt.y << ")\n";
+            // cout << "  Keypoint from Image 2: (" << kp2.pt.x << ", " << kp2.pt.y << ")\n";
+        
+
+            bool isFarEnough = true;
+            for (const auto& addedPoint : points1) {
+                if (calculateL2Distance(addedPoint, kp1.pt) <= 10.0) {
+                    isFarEnough = false;
+                    break;
+                }
+            }
+
+            // Add keypoints only if far enough
+            if (isFarEnough) {
+                if(DEBUG) cout << "Points: " << points1.size() << endl;
+                points1.push_back(kp1.pt);
+                points2.push_back(kp2.pt);
+
+                // Print the coordinates of the matched keypoints
+                std::cout << "Match " << index << ":\n";
+                std::cout << "\tKeypoint from Image 1: (" << kp1.pt.x << ", " << kp1.pt.y << ")\n";
+                std::cout << "\tKeypoint from Image 2: (" << kp2.pt.x << ", " << kp2.pt.y << ")\n";
+
+                num_points_added++;
+            }
+    
+        }
+
+        if(num_points_added < 8) continue;
+
+        if(DEBUG){
+            // Draw points and numbers on image1
+            for (size_t i = 0; i < points1.size(); ++i) {
+                // Draw point
+                circle(loader.imagesColor[n], points1[i], 5, Scalar(0, 0, 255), -1); // Red dot
+
+                // Add number label
+                putText(loader.imagesColor[n], to_string(i + 1), points1[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+            }
+
+            // Draw points and numbers on image2
+            for (size_t i = 0; i < points2.size(); ++i) {
+                // Draw point
+                circle(loader.imagesColor[n + 1], points2[i], 5, Scalar(255, 0, 0), -1); // Blue dot
+
+                // Add number label
+                putText(loader.imagesColor[n + 1], to_string(i + 1), points2[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
+            }
+
+            // Display the images
+            imshow("Image 1 with Points", loader.imagesColor[0]);
+            imshow("Image 2 with Points", loader.imagesColor[1]);
+
+            // Wait for a key press and save the images if needed
+            waitKey(0);
+        }
+
+
+        // Intrinsics of Info.txt file in BundleFusion Dataaset
+        Mat K4 = Mat(4, 4, DataType<double>::type, &loader.info.calibrationColorIntrinsic);
+        //Mat K = (Mat_<double>(3, 3) << 582.871, 0, 320, 0, 582.871, 240, 0, 0, 1);
+        Mat K = K4(Range(0, 3), Range(0, 3));
+
+        //-- Step 6: // Compute the Fundamental and Essential Matrix using the 8-point algorithm
+        Mat F = findFundamentalMat(points1, points2, FM_8POINT);
+
+        if(DEBUG) cout << "Fundamental Matrix:\n" << F << endl;
+        if (F.type() != DataType<double>::type){
+            cout << "Error while finding Fundamental Matrix" << endl;
+            continue;
+        }
+
+        // Compute the Essential Matrix: E = K'^T * F * K
+        Mat E = K.t() * F * K;
+
+        //cout << "Essential Matrix:\n" << E << endl;
+
+        // // Decompose the Essential Matrix into R and t
+        // Mat R1, R2, t;
+        // decomposeEssentialMat(E, R1, R2, t);
+
+        // // Output the results
+        // cout << "Rotation Matrix R1:\n" << R1 << endl;
+        // cout << "Rotation Matrix R2:\n" << R2 << endl;
+        // cout << "Translation Vector t:\n" << t << endl;
+
+        //-- Step 7: Recover pose (R, t)
+        Mat R, t;
+        recoverPose(E, points1, points2, K, R, t);
+
+        if(DEBUG) cout << "Rotation Matrix R:\n" << R << endl;
+        if(DEBUG) cout << "Translation Vector t:\n" << t << endl;
+
+        //points1.clear();
+        //points2.clear();
+
+        // Vectors to hold matching points
+        vector<Point2f> all_points_1, all_points_2;
+
+        // Iterate through matches and extract corresponding points
+        for (const auto& match : good_matches) {
+            if (match.queryIdx >= keypoints[n].size() || match.trainIdx >= keypoints[n + 1].size()) continue;
+
+            all_points_1.push_back(keypoints[n][match.queryIdx].pt); // Point from keypoints1
+            all_points_2.push_back(keypoints[n + 1][match.trainIdx].pt); // Point from keypoints2
+        }
+
+        // Calculate ground truth points
+        //for (auto& p : all_points_1) {
+        for (int i = 0; i < all_points_1.size(); i++){
+            auto& p = all_points_1[i];
+            Point3f point = groundTruthPoint(p, loader.imagesDepth[n], loader.info.depthShift, depthInv, loader.cameraPose[n]);
+            if (point.x == 0 && point.y == 0 && point.z == 0) continue;
+            Vec3b color = loader.imagesColor[n].at<Vec3b>(p.x, p.y);
+            all_points_ground_truth.push_back(Vertex(point, color));
+        }
+
+        //-- Step 8: Generate 3D points via triangulation
+        Mat points4D;
+        Mat K_float, T_float;
+        K.convertTo(K_float, CV_32F);
+        Mat T = (Mat_<double>(3, 4) << R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0),
+                                        R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1),
+                                        R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2));
+        T.convertTo(T_float, CV_32F);
+        triangulatePoints(K_float * Mat::eye(3, 4, DataType<float>::type), K_float * T_float,
+                                                            all_points_1, all_points_2, points4D);
+
+
+
+
+        // Convert points to homogeneous coordinates
+        vector<Point3f> points3D;
+        for (int i = 0; i < points4D.cols; i++) {
+            Point3f pt(points4D.at<float>(0, i) / points4D.at<float>(3, i),
+                        points4D.at<float>(1, i) / points4D.at<float>(3, i),
+                        points4D.at<float>(2, i) / points4D.at<float>(3, i));
+            points3D.push_back(pt);
+        }
+
+
+        // Create a double array to store the matrix data
+        double rotation_params[9] = {R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2),
+                                    R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2),
+                                    R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2)};
+
+        double angle_axis[3];
+
+        // Convert the rotation matrix to angle-axis
+        ceres::RotationMatrixToAngleAxis(rotation_params, angle_axis);
+
+
+        // Initialize camera parameters for Ceres (rotation in angle-axis + translation)
+        // double camera_params[6] = {angle_axis[0], angle_axis[1], angle_axis[2], t.at<double>(0), t.at<double>(1), t.at<double>(2)};
+        double* camera_params = new double[6]; // Dynamically allocate memory for 6 elements
+
+        camera_params[0] = angle_axis[0];
+        camera_params[1] = angle_axis[1];
+        camera_params[2] = angle_axis[2];
+        camera_params[3] = t.at<double>(0);
+        camera_params[4] = t.at<double>(1);
+        camera_params[5] = t.at<double>(2);
+
+        double K_array[9];
+        for (int i = 0; i < K.rows; ++i) {
+            for (int j = 0; j < K.cols; ++j) {
+                K_array[i * K.cols + j] = K.at<double>(i, j);
+            }
+        }
+
+        //-- Step 9:  Setup Ceres problem
+
+        /*TODO: The current single optimizer for camera pose fails in the residual calculation. This needs to be debugged 
+        */
+        ceres::Problem problem;
+
+        for (size_t i = 0; i < points3D.size(); i++) {
+
+            ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionError, 2, 6, 3>(
+                new ReprojectionError(all_points_1[i].x, all_points_2[i].y, K_array));
+
+            // double point_3d[3] = {points3D[i].x, points3D[i].y, points3D[i].z};
+            double *point_3d = new double[3];
+            point_3d[0] = points3D[i].x;
+            point_3d[1] = points3D[i].y;
+            point_3d[2] = points3D[i].z;
+
+            problem.AddResidualBlock(cost_function, nullptr, camera_params, point_3d);
+        }
+
+        // Configure solver
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_SCHUR;
+        options.minimizer_progress_to_stdout = true;
+
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+
+        // Output results
+        cout << "Final Camera Parameters: ";
+        for (int i=0; i<6; i++) {
+            cout << camera_params[i] << " ";
+        }
+        cout << endl;
+
+        if(DEBUG) cout << summary.FullReport() << endl;
+        else cout << summary.BriefReport() << endl;
+
+        //all_points_1.clear();
+        //all_points_2.clear();
+
+
+        cv::Vec3d final_angle_axis(camera_params[0], camera_params[1], camera_params[2]);
+        cv::Mat rotation_matrix;
+        cv::Rodrigues( final_angle_axis, rotation_matrix);
+
+        // Display the rotation matrix
+        if(DEBUG) std::cout << "Rotation Matrix:\n" << rotation_matrix << std::endl;
+
+        t.at<double>(0) = camera_params[3];
+        t.at<double>(1) = camera_params[4];
+        t.at<double>(2) = camera_params[5];
+        if(DEBUG) cout << "Translation Vector t:\n" << t << endl;
+
+        cout << "Finished comparing Images " << n << " and " << n + 1 << endl;
+
+        // keep track of global rotation and translation
+        Mat transformation = Mat::eye(4, 4, DataType<double>::type);
+        rotation_matrix.copyTo(transformation(Range(0, 3), Range(0, 3)));
+        t.copyTo(transformation(Range(0, 3), Range(3, 4)));
+        globalRotation = transformation * globalRotation;
+        if(DEBUG) cout << "Global Transformation:\n" << globalRotation << endl;
+
+        // manually correct the camera pose
+        auto& cp = loader.cameraPose[n + 1];
+        //cp.copyTo(globalRotation);
+
+        // add new points to old ones
+        for(auto& p : points3D){
+            Vec3d p_v = cv::Vec3d(p.x, p.y, p.z);
+            Mat p_m = globalRotation(Range(0, 3), Range(0, 3)) * p_v + globalRotation(Range(0, 3), Range(3, 4));
+            allPoints.push_back(Point3f(p_m.at<double>(0,0), p_m.at<double>(1,0), p_m.at<double>(2,0)));
+        }
+
+        cameras.push_back(Point3f(globalRotation.at<double>(0, 3), globalRotation.at<double>(1, 3), globalRotation.at<double>(2, 3)));
+        all_points_ground_truth.push_back(Vertex(Point3f(cp.at<double>(0, 3), cp.at<double>(1, 3), cp.at<double>(2, 3)), Vec3b(255, 0, 0)));
     }
 
-    //-- Step 9:  Setup Ceres problem
+    // Write Mesh
+    pointsToMesh(allPoints, cameras, "mesh_out.off", 1.0);
+    vertexToMesh(all_points_ground_truth, "mesh_out_ref.off");
 
-    /*TODO: The current single optimizer for camera pose fails in the residual calculation. This needs to be debugged 
-    */
-    ceres::Problem problem;
-
-    for (size_t i = 0; i < points3D.size(); i++) {
-
-        ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionError, 2, 6, 3>(
-            new ReprojectionError(all_points_1[i].x, all_points_2[i].y, K_array));
-
-        // double point_3d[3] = {points3D[i].x, points3D[i].y, points3D[i].z};
-        double *point_3d = new double[3];
-        point_3d[0] = points3D[i].x;
-        point_3d[1] = points3D[i].y;
-        point_3d[2] = points3D[i].z;
-
-        problem.AddResidualBlock(cost_function, nullptr, camera_params, point_3d);
-    }
-
-    // Configure solver
-    ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_SCHUR;
-    options.minimizer_progress_to_stdout = true;
-
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-
-    // Output results
-    cout << "Final Camera Parameters: ";
-    for (int i=0; i<6; i++) {
-        cout << camera_params[i] << " ";
-    }
-    cout << endl;
-
-    cout << summary.FullReport() << endl;
-
-
-    cv::Vec3d final_angle_axis(camera_params[0], camera_params[1], camera_params[2]);
-    cv::Mat rotation_matrix;
-    cv::Rodrigues( final_angle_axis, rotation_matrix);
-
-    // Display the rotation matrix
-    std::cout << "Rotation Matrix:\n" << rotation_matrix << std::endl;
+    waitKey();
 
     return 0;
 }
