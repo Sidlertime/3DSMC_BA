@@ -7,6 +7,9 @@
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/opencv.hpp>
+#include "Eigen"
+
+#include "dataloader_bal.hpp"
 
 using namespace std;
 using namespace cv;
@@ -72,6 +75,46 @@ bool pointsToMesh(vector<Point3f> points, vector<Point3f> cameraPositions, const
             outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
         }
     }
+
+    outFile.close();
+
+    return true;
+}
+
+bool balToMesh(bal_problem& bal, const string& filename = "mesh_out.off"){
+    cout << "Writing Mesh" << endl;
+
+    ofstream outFile(filename);
+    if(!outFile.is_open()) return false;
+
+	// write header
+	outFile << "COFF" << endl;
+
+	outFile << "# numVertices numFaces numEdges" << endl;
+
+	outFile << bal.num_points + bal.num_cameras << " 0 0" << endl;
+
+    for (int i = 0; i < bal.num_points; i++){
+        auto& p = bal.points[i];
+        if(isfinite(p.x()) && isfinite(p.y()) && isfinite(p.z())){
+            // Point coordinates in color Black
+            outFile << p.x() << " " << p.y() << " " << p.z() << " 0 0 0 0" << endl;
+        } else {
+            outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
+        }
+    }
+
+    for (int i = 0; i < bal.num_cameras; i++){
+        auto& c = bal.cameras[i];
+        if(isfinite(c.t.x()) && isfinite(c.t.y()) && isfinite(c.t.z())){
+            // Camera coordinates in color Red
+            outFile << c.t.x() << " " << c.t.y() << " " << c.t.z() << " 255 0 0 0" << endl;
+        } else {
+            outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
+        }
+    }
+
+    cout << "Finished writing BAL to mesh" << endl;
 
     outFile.close();
 

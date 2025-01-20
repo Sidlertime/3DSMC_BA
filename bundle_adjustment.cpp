@@ -11,7 +11,9 @@
 #include <cmath>
 
 #include "dataloader_bf.hpp"
+#include "dataloader_bal.hpp"
 #include "mesh_utils.hpp"
+#include "solver_ceres.hpp"
 
 using namespace std;
 using namespace cv;
@@ -127,6 +129,15 @@ int main ( int argc, char** argv )
     if(argc > 1) setName = argv[1];
     if(argc > 2) imgSize = atoi(argv[2]);
     if(argc > 3) every = atoi(argv[3]);
+
+    if(setName.find("BAL") >= 0){
+        bal_problem problem = bal_problem();
+        load_bal(setName, problem);
+        balToMesh(problem, "bal.off");
+
+        solveBAL(problem);
+        return 0;
+    }
 
     //put images into ../Data/Bundle Fusion/<setName> where setName is i.e. office3
     DataloaderBF loader = DataloaderBF();
@@ -497,13 +508,6 @@ int main ( int argc, char** argv )
 
         cout << "Finished comparing Images " << n << " and " << n + 1 << endl;
 
-        // keep track of global rotation and translation
-        Mat transformation = Mat::eye(4, 4, DataType<double>::type);
-        rotation_matrix.copyTo(transformation(Range(0, 3), Range(0, 3)));
-        t.copyTo(transformation(Range(0, 3), Range(3, 4)));
-        globalRotation = transformation * globalRotation;
-        if(DEBUG) cout << "Global Transformation:\n" << globalRotation << endl;
-
         // manually correct the camera pose
         auto& cp = loader.cameraPose[n + 1];
         //cp.copyTo(globalRotation);
@@ -517,6 +521,13 @@ int main ( int argc, char** argv )
 
         cameras.push_back(Point3f(globalRotation.at<double>(0, 3), globalRotation.at<double>(1, 3), globalRotation.at<double>(2, 3)));
         all_points_ground_truth.push_back(Vertex(Point3f(cp.at<double>(0, 3), cp.at<double>(1, 3), cp.at<double>(2, 3)), Vec3b(255, 0, 0)));
+
+        // keep track of global rotation and translation
+        Mat transformation = Mat::eye(4, 4, DataType<double>::type);
+        rotation_matrix.copyTo(transformation(Range(0, 3), Range(0, 3)));
+        t.copyTo(transformation(Range(0, 3), Range(3, 4)));
+        globalRotation = transformation * globalRotation;
+        if(DEBUG) cout << "Global Transformation:\n" << globalRotation << endl;
     }
 
     // Write Mesh
