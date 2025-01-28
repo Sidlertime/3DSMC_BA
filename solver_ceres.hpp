@@ -82,6 +82,7 @@ void solveBA(BA_problem& bal){
     if(bal.dynamic_K){
         for (size_t i = 0; i < bal.num_observations; i++) {
             auto& obs = bal.observations[i];
+            if(bal.invalid_points[obs.point_index]) continue;   // outlier
             auto& cam = bal.cameras[obs.camera_index];
             double* r = cam.R.data();
             double* t = cam.t.data();
@@ -94,9 +95,17 @@ void solveBA(BA_problem& bal){
     } else {
         for (size_t i = 0; i < bal.num_observations; i++) {
             auto& obs = bal.observations[i];
+            //cout << "Observation: " << i << " with camera: " << obs.camera_index << " point: " << obs.point_index << " at " << obs.x << ", " << obs.y << endl;
+            if(bal.invalid_points[obs.point_index]) continue;   // outlier
+            if(obs.camera_index >= bal.num_cameras){
+                cout << "PANIK with observation " << i << " has camera index " << obs.camera_index << endl;
+            }
             auto& cam = bal.cameras[obs.camera_index];
             double* r = cam.R.data();
             double* t = cam.t.data();
+            if(obs.point_index >= bal.num_points){
+                cout << "PANIK with observation " << i << " has point index " << obs.point_index << endl;
+            }
             double* point = bal.points[obs.point_index].data();
 
             ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionErrorFixK, 2, 3, 3, 3>(

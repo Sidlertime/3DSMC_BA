@@ -82,7 +82,7 @@ bool pointsToMesh(vector<Point3f> points, vector<Point3f> cameraPositions, const
 }
 
 bool balToMesh(BA_problem& bal, const string& filename = "mesh_out.off"){
-    cout << "Writing Mesh" << endl;
+    cout << "Writing mesh " << filename << endl;
 
     ofstream outFile(filename);
     if(!outFile.is_open()) return false;
@@ -114,7 +114,7 @@ bool balToMesh(BA_problem& bal, const string& filename = "mesh_out.off"){
         }
     }
 
-    cout << "Finished writing BAL to mesh" << endl;
+    cout << "Finished writing BAL to mesh " << filename << endl;
 
     outFile.close();
 

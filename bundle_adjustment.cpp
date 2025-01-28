@@ -114,27 +114,30 @@ double calculateL2Distance(const Point2f& point1, const Point2f& point2) {
 
 // Get ground truth position for a given image point
 Point3f groundTruthPoint(Point2f& point, Mat& depthMap, int depthShift, Mat& depthIntrinsicInv, Mat& trajectoryInv){
-    double z = double(depthMap.at<uint16_t>(int(point.x), int(point.y))) / double(depthShift);
+    double z = double(depthMap.at<uint16_t>(int(point.y), int(point.x))) / double(depthShift);
     if (z == 0.0) {
         return Point3f(0.f,0.f,0.f);
     }
     Mat cameraCoord = z * depthIntrinsicInv * Vec3d(double(point.x), double(point.y), 1.0);
-    Mat worldCoord = trajectoryInv(Range(0, 3), Range(0, 3)).t() * (cameraCoord - trajectoryInv(Range(0,3), Range(3,4)));
+    Mat worldCoord = trajectoryInv(Range(0, 3), Range(0, 3)) * (cameraCoord - trajectoryInv(Range(0,3), Range(3,4)));
     return Point3f(worldCoord.at<double>(0), worldCoord.at<double>(1), worldCoord.at<double>(2));
 }
 
-vector<Vertex> imageTo3D(Mat& colorMap, Mat& depthMap, int width, int height, int depthShift, Mat&depthIntrinsicsInv, Mat& trajectoryInv){
+vector<Vertex> imageTo3D(Mat& colorMap, Mat& depthMap, int depthShift, Mat&depthIntrinsicsInv, Mat& trajectoryInv){
     vector<Vertex> vertices = vector<Vertex>();
+
+    int width = min(colorMap.cols, depthMap.cols);
+    int height = min(colorMap.rows, depthMap.rows);
 
     cout << "Transforming image (" << width << ", " << height << ") to 3D" << endl;
 
     for (int x = 0; x < width; x++){
         for (int y = 0; y < height; y++){
-            uint16_t& d = depthMap.at<uint16_t>(x, y);
+            uint16_t& d = depthMap.at<uint16_t>(y, x);
             if(d > 0){
                 auto p2d = Point2f(x, y);
                 auto point = groundTruthPoint(p2d , depthMap, depthShift, depthIntrinsicsInv, trajectoryInv);
-                auto& color = colorMap.at<Vec3b>(x, y);
+                auto& color = colorMap.at<Vec3b>(y, x);
                 vertices.push_back(Vertex(point, color));
             }
         }
@@ -157,9 +160,15 @@ int main ( int argc, char** argv )
     if(setName.find("BAL") < setName.length()){
         BA_problem problem = BA_problem();
         load_bal(setName, problem);
+        int removed = BARemoveOutliersRelativ(problem, 2.0);
+        cout << "Removed " << removed << " Outliers before optimization" << endl;
         balToMesh(problem, "bal.off");
 
         solveBA(problem);
+        removed = BARemoveOutliersRelativ(problem, 1.7);
+        cout << "Removed " << removed << " Outliers after optimization" << endl;
+
+        balToMesh(problem, "bal_optimized.off");
         return 0;
     }
 
@@ -172,20 +181,27 @@ int main ( int argc, char** argv )
     cout << "Depth inverted:\n" << depthInv << endl;
 
     if(setName == "apt0"){
-        auto problem  = processBFSet(loader);
+        BA_problem problem  = processBFSet(loader);
 
+        cout << "Successfully processed Bundle Fusion set " << setName << " with " << problem.num_observations << " Observations" << endl;
+        save_bal(problem, "apt0.txt");
+
+        BARemoveOutliersRelativ(problem);
+
+        cout << "Solving the Bundle Adjustment Problem now..." << endl;
         solveBA(problem);
+        cout << "Successfully solved the Bundle Adjustment Problem" << endl;
+
+        BARemoveOutliersRelativ(problem);
         balToMesh(problem, "apt0.off");
         return 0;
     }
     
     if(setName == "apt0"){
-        auto v = imageTo3D(loader.imagesColor[0], 
-                    loader.imagesDepth[0], 
-                    loader.info.colorWidth, 
-                    loader.info.colorHeight, 
-                    loader.info.depthShift, 
-                    depthInv, 
+        auto v = imageTo3D(loader.imagesColor[0],
+                    loader.imagesDepth[0],
+                    loader.info.depthShift,
+                    depthInv,
                     loader.cameraPose[0]);
         cout << v.size() << endl;
         vertexToMesh(v, "frame_0.off");
@@ -441,7 +457,7 @@ int main ( int argc, char** argv )
             if (p.x < 0 || p.x >= loader.info.depthWidth || p.y < 0 || p.y >= loader.info.depthHeight) continue;
             Point3f point = groundTruthPoint(p, loader.imagesDepth[n], loader.info.depthShift, depthInv, loader.cameraPose[n]);
             if (point.x == 0 && point.y == 0 && point.z == 0) continue;
-            Vec3b color = loader.imagesColor[n].at<Vec3b>(p.x, p.y);
+            Vec3b color = loader.imagesColor[n].at<Vec3b>(p.y, p.x);
             all_points_ground_truth.push_back(Vertex(point, color));
         }
 

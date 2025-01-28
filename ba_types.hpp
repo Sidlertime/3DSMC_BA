@@ -28,12 +28,63 @@ struct BA_problem {
     Observation* observations;
     Camera* cameras;
     Eigen::Vector3d* points;
+    bool* invalid_points;
 
-    BA_problem() : num_cameras(0), num_points(0), num_observations(0), dynamic_K(false), observations(NULL), cameras(NULL), points(NULL){}
+    BA_problem() : num_cameras(0), num_points(0), num_observations(0), dynamic_K(false), observations(NULL), cameras(NULL), points(NULL), invalid_points(NULL){}
 
     ~BA_problem(){
         if (observations != NULL) delete[] observations;
         if (cameras != NULL) delete[] cameras;
         if (points != NULL) delete[] points;
+        if (invalid_points != NULL) delete[] invalid_points;
     }
 };
+
+int BARemoveOutliersAbsolut(BA_problem& problem, double distance = 1000.0){
+    if (problem.points == NULL || problem.invalid_points == NULL) return 0;
+
+    Eigen::Vector3d center(0, 0, 0);
+    for (int i = 0; i < problem.num_points; i++){
+        center += problem.points[i] / problem.num_points;
+    }
+
+    int removed = 0;
+
+    for (int i = 0; i < problem.num_points; i++){
+        if ((problem.points[i] - center).norm() > distance){
+            problem.invalid_points[i] = true;
+            removed++;
+        } else {
+            problem.invalid_points[i] = false;
+        }
+    }
+
+    return removed;
+}
+
+int BARemoveOutliersRelativ(BA_problem& problem, double deviation_factor = 2.0){
+    if (problem.points == NULL || problem.invalid_points == NULL) return 0;
+
+    Eigen::Vector3d center(0, 0, 0);
+    for (int i = 0; i < problem.num_points; i++){
+        center += problem.points[i] / problem.num_points;
+    }
+
+    double mean_distance = 0;
+    for (int i = 0; i < problem.num_points; i++){
+        mean_distance += (center - problem.points[i]).norm() / problem.num_points;
+    }
+
+    int removed = 0;
+
+    for (int i = 0; i < problem.num_points; i++){
+        if ((problem.points[i] - center).norm() > deviation_factor * mean_distance){
+            problem.invalid_points[i] = true;
+            removed++;
+        } else {
+            problem.invalid_points[i] = false;
+        }
+    }
+
+    return removed;
+}

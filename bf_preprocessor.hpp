@@ -8,6 +8,8 @@
 BA_problem processBFSet(DataloaderBF& loader){
 
     // SIFT
+    cout << "Calculating keypoints and descriptors..." << endl;
+
     vector<Mat> grays;
 
     Ptr<SIFT> sift = SIFT::create();
@@ -33,6 +35,10 @@ BA_problem processBFSet(DataloaderBF& loader){
         descriptors.push_back(dc);
     }
 
+    cout << "Finished calculating keypoints and descriptors..." << endl;
+
+    cout << "Comparing keypoints Image to Image" << endl;
+
     vector<Point3d> points3D;
     vector<Observation> observations;
     vector<map<int, int>> point2idx_map;
@@ -41,8 +47,13 @@ BA_problem processBFSet(DataloaderBF& loader){
     BFMatcher matcher(NORM_L2);
     vector<DMatch> matches;
 
+    Mat K_float;
+    //loader.colorIntrinsic(Range(0, 3), Range(0, 3)).convertTo(K_float, CV_32F);
+    loader.colorIntrinsic(Range(0, 3), Range(0, 3)).convertTo(K_float, CV_64F);
+
     // Compare every frame with every frame for keypoints
     for(int m = 0; m < loader.nImages - 1; m++){
+        cout << "Comparing Image " << m << " to all others..." << endl;
         for (int n = m + 1; n < loader.nImages; n++){
             // Feature matching
             matches.clear();
@@ -107,16 +118,25 @@ BA_problem processBFSet(DataloaderBF& loader){
                 }
             }
             
+            // no new points to triangulate
+            if(points_1.size() == 0) continue;
 
             // Generate 3D points via triangulation
             Mat points4D;
-            Mat K_float, T_m_float, T_n_float;
-            loader.colorIntrinsic(Range(0, 3), Range(0, 3)).convertTo(K_float, CV_32F);
-            loader.cameraPose[m].convertTo(T_m_float, CV_32F);
-            loader.cameraPose[n].convertTo(T_n_float, CV_32F);
+            Mat T_m_float, T_n_float;
+            //loader.cameraPose[m].convertTo(T_m_float, CV_32F);
+            //loader.cameraPose[n].convertTo(T_n_float, CV_32F);
+            loader.cameraPose[m].convertTo(T_m_float, CV_64F);
+            loader.cameraPose[n].convertTo(T_n_float, CV_64F);
 
-            triangulatePoints(K_float * T_m_float(Range(0, 3), Range(0, 4)), 
-                    K_float * T_n_float(Range(0, 3), Range(0, 4)), points_1, points_2, points4D);
+            //vector<Point2f> undistorted_1, undistorted_2;
+            //undistortPoints(points_1, undistorted_1, K_float, Vec4d(0, 0, 0, 0));
+            //undistortPoints(points_2, undistorted_2, K_float, Vec4d(0, 0, 0, 0));
+
+            triangulatePoints(K_float * T_m_float.inv()(Range(0, 3), Range(0, 4)), 
+                    K_float * T_n_float.inv()(Range(0, 3), Range(0, 4)), points_1, points_2, points4D);
+            //triangulatePoints(T_m_float(Range(0, 3), Range(0, 4)), 
+            //        T_n_float(Range(0, 3), Range(0, 4)), undistorted_1, undistorted_2, points4D);
             
             // Convert points to homogeneous coordinates
             for (int i = 0; i < points4D.cols; i++) {
@@ -128,14 +148,17 @@ BA_problem processBFSet(DataloaderBF& loader){
         }
     }
 
+    cout << "Finished comparing all Images" << endl;
+
     BA_problem problem;
+    problem.dynamic_K = false;
     problem.num_cameras = loader.nImages;
     problem.num_observations = observations.size();
     problem.num_points = points3D.size();
 
     problem.cameras = new Camera[problem.num_cameras];
     for (int i = 0; i < problem.num_cameras; i++){
-        Mat c_p = loader.cameraPose[i].inv();
+        Mat c_p = loader.cameraPose[i];
         auto& c = problem.cameras[i];
         Mat R;
         cv::Rodrigues(c_p(Range(0, 3), Range(0, 3)), R);
@@ -144,14 +167,20 @@ BA_problem processBFSet(DataloaderBF& loader){
         c.f = loader.colorIntrinsic.at<double>(0,0);
         c.k1 = loader.colorIntrinsic.at<double>(0,2);
         c.k2 = loader.colorIntrinsic.at<double>(1,2);
-        cout << "Camera Pose:\n" << c_p << endl;
-        cout << "Camera: " << i << " with Rotation: " << c.R << " and Translation: " << c.t << endl;
+        //cout << "Camera Pose:\n" << c_p << endl;
+        //cout << "Camera: " << i << " with Rotation: " << c.R << " and Translation: " << c.t << endl;
     }
 
     problem.observations = new Observation[problem.num_observations];
     for (int i = 0; i < problem.num_observations; i++){
         auto& obs = observations[i];
-        problem.observations[i] = obs;
+        if(obs.camera_index >= problem.num_cameras){
+            cout << "PANIK with observation " << i << " has camera index " << obs.camera_index << endl;
+        }
+        if(obs.point_index >= problem.num_points){
+            cout << "PANIK with observation " << i << " has point index " << obs.point_index << endl;
+        }
+        problem.observations[i] = Observation(obs);
     }
 
     problem.points = new Eigen::Vector3d[problem.num_points];
@@ -159,6 +188,7 @@ BA_problem processBFSet(DataloaderBF& loader){
         auto& p = points3D[i];
         problem.points[i] = Eigen::Vector3d(p.x, p.y, p.z);
     }
+    problem.invalid_points = new bool[problem.num_points];
 
     return problem;
 }
