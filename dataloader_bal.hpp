@@ -4,8 +4,7 @@
 #include <fstream>
 #include "Eigen"
 
-using namespace std;
-using namespace Eigen;
+#include "ba_types.hpp"
 
 /*** 
  * Load data of the Bundle Adjustment in the Large Dataset 
@@ -22,48 +21,23 @@ using namespace Eigen;
  * <point_num_points>
  */
 
-struct observation {
-    int camera_index;
-    int point_index;
-    double x;
-    double y;
-};
-
-struct camera {
-    Vector3d R;
-    Vector3d t;
-    double f;
-    double k1;
-    double k2;
-};
-
-struct bal_problem {
-    int num_cameras;
-    int num_points;
-    int num_observations;
-    observation* observations;
-    camera* cameras;
-    Vector3d* points;
-
-    bal_problem():num_cameras(0), num_points(0), num_observations(0), observations(NULL), cameras(NULL), points(NULL){}
-
-    ~bal_problem(){
-        if (observations) delete[] observations;
-        if (cameras) delete[] cameras;
-        if (points) delete[] points;
-    }
-};
-
-bool load_bal(const string& path, bal_problem& p){
+bool load_bal(const string& path, BA_problem& p){
     ifstream infile(path);
 
     if (!infile.is_open()) return false;
 
+    p.dynamic_K = true;
+
     infile >> p.num_cameras >> p.num_points >> p.num_observations;
 
-    p.cameras = new camera[p.num_cameras];
-    p.points = new Vector3d[p.num_points];
-    p.observations = new observation[p.num_observations];
+    if (p.cameras == NULL) delete[] p.cameras;
+    p.cameras = new Camera[p.num_cameras];
+
+    if (p.points == NULL) delete[] p.points;
+    p.points = new Eigen::Vector3d[p.num_points];
+
+    if (p.observations == NULL) delete[] p.observations;
+    p.observations = new Observation[p.num_observations];
 
     for (int i = 0; i < p.num_observations; i++){
         auto& obs = p.observations[i];
@@ -74,9 +48,9 @@ bool load_bal(const string& path, bal_problem& p){
         auto& camera = p.cameras[i];
         infile >> camera.R.x() >> p.cameras[i].R.y() >> camera.R.z() 
             >> camera.t.x() >> camera.t.y() >> camera.t.z()
-            >> p.cameras[i].f
-            >> p.cameras[i].k1
-            >> p.cameras[i].k2;
+            >> camera.f
+            >> camera.k1
+            >> camera.k2;
     }
 
     for (int i = 0; i < p.num_points; i++){

@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include "dataloader_bf.hpp"
+#include "bf_preprocessor.hpp"
 #include "dataloader_bal.hpp"
 #include "mesh_utils.hpp"
 #include "solver_ceres.hpp"
@@ -112,11 +113,34 @@ double calculateL2Distance(const Point2f& point1, const Point2f& point2) {
 }
 
 // Get ground truth position for a given image point
-inline Point3f groundTruthPoint(Point2f& point, Mat& depthMap, int depthShift, Mat& depthIntrinsicInv, Mat& trajectoryInv){
-    double z = double(depthMap.at<unsigned short>(point.x, point.y)) / double(depthShift);
-    if (z == 0.0) return Point3f(0.f,0.f,0.f);
-    Mat pos(trajectoryInv * depthIntrinsicInv * Vec4d(double(point.x) * z, double(point.y) * z, z, 1.0));
-    return Point3f(pos.at<double>(0), pos.at<double>(1), pos.at<double>(2));
+Point3f groundTruthPoint(Point2f& point, Mat& depthMap, int depthShift, Mat& depthIntrinsicInv, Mat& trajectoryInv){
+    double z = double(depthMap.at<uint16_t>(int(point.x), int(point.y))) / double(depthShift);
+    if (z == 0.0) {
+        return Point3f(0.f,0.f,0.f);
+    }
+    Mat cameraCoord = z * depthIntrinsicInv * Vec3d(double(point.x), double(point.y), 1.0);
+    Mat worldCoord = trajectoryInv(Range(0, 3), Range(0, 3)).t() * (cameraCoord - trajectoryInv(Range(0,3), Range(3,4)));
+    return Point3f(worldCoord.at<double>(0), worldCoord.at<double>(1), worldCoord.at<double>(2));
+}
+
+vector<Vertex> imageTo3D(Mat& colorMap, Mat& depthMap, int width, int height, int depthShift, Mat&depthIntrinsicsInv, Mat& trajectoryInv){
+    vector<Vertex> vertices = vector<Vertex>();
+
+    cout << "Transforming image (" << width << ", " << height << ") to 3D" << endl;
+
+    for (int x = 0; x < width; x++){
+        for (int y = 0; y < height; y++){
+            uint16_t& d = depthMap.at<uint16_t>(x, y);
+            if(d > 0){
+                auto p2d = Point2f(x, y);
+                auto point = groundTruthPoint(p2d , depthMap, depthShift, depthIntrinsicsInv, trajectoryInv);
+                auto& color = colorMap.at<Vec3b>(x, y);
+                vertices.push_back(Vertex(point, color));
+            }
+        }
+    }
+
+    return vertices;
 }
 
 int main ( int argc, char** argv )
@@ -130,21 +154,43 @@ int main ( int argc, char** argv )
     if(argc > 2) imgSize = atoi(argv[2]);
     if(argc > 3) every = atoi(argv[3]);
 
-    if(setName.find("BAL") >= 0){
-        bal_problem problem = bal_problem();
+    if(setName.find("BAL") < setName.length()){
+        BA_problem problem = BA_problem();
         load_bal(setName, problem);
         balToMesh(problem, "bal.off");
 
-        solveBAL(problem);
+        solveBA(problem);
         return 0;
     }
 
     //put images into ../Data/Bundle Fusion/<setName> where setName is i.e. office3
     DataloaderBF loader = DataloaderBF();
     loader.loadImages(setName, imgSize, every); // argv[1] contains the setname, might be generalized to a path in the future
+    Mat depthInv = loader.getDepthIntrinsic()(Range(0,3), Range(0,3)).inv();
     cout << "Color intr\n" << loader.getColorIntrinsic() << endl;
     cout << "Depth intr\n" << loader.getDepthIntrinsic() << endl;
-    cout << "Depth inverted:\n" << loader.getDepthIntrinsic().inv() << endl;
+    cout << "Depth inverted:\n" << depthInv << endl;
+
+    if(setName == "apt0"){
+        auto problem  = processBFSet(loader);
+
+        solveBA(problem);
+        balToMesh(problem, "apt0.off");
+        return 0;
+    }
+    
+    if(setName == "apt0"){
+        auto v = imageTo3D(loader.imagesColor[0], 
+                    loader.imagesDepth[0], 
+                    loader.info.colorWidth, 
+                    loader.info.colorHeight, 
+                    loader.info.depthShift, 
+                    depthInv, 
+                    loader.cameraPose[0]);
+        cout << v.size() << endl;
+        vertexToMesh(v, "frame_0.off");
+        return 0;
+    }
 
     if (DEBUG){
         imshow("Colorimage", loader.imagesColor[0]);
@@ -198,7 +244,6 @@ int main ( int argc, char** argv )
 
     vector<Vertex> all_points_ground_truth;
     all_points_ground_truth.push_back(Vertex(Point3f(0,0,0),Vec3b(255,0,0)));
-    Mat depthInv = loader.getDepthIntrinsic().inv();
 
     BFMatcher matcher(NORM_L2);
     vector<DMatch> matches;
@@ -393,6 +438,7 @@ int main ( int argc, char** argv )
         //for (auto& p : all_points_1) {
         for (int i = 0; i < all_points_1.size(); i++){
             auto& p = all_points_1[i];
+            if (p.x < 0 || p.x >= loader.info.depthWidth || p.y < 0 || p.y >= loader.info.depthHeight) continue;
             Point3f point = groundTruthPoint(p, loader.imagesDepth[n], loader.info.depthShift, depthInv, loader.cameraPose[n]);
             if (point.x == 0 && point.y == 0 && point.z == 0) continue;
             Vec3b color = loader.imagesColor[n].at<Vec3b>(p.x, p.y);
