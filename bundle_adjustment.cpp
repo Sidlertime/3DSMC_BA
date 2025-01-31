@@ -112,17 +112,7 @@ double calculateL2Distance(const Point2f& point1, const Point2f& point2) {
     return sqrt(dx * dx + dy * dy);
 }
 
-// Get ground truth position for a given image point
-Point3f groundTruthPoint(Point2f& point, Mat& depthMap, int depthShift, Mat& depthIntrinsicInv, Mat& trajectoryInv){
-    double z = double(depthMap.at<uint16_t>(int(point.y), int(point.x))) / double(depthShift);
-    if (z == 0.0) {
-        return Point3f(0.f,0.f,0.f);
-    }
-    Mat cameraCoord = z * depthIntrinsicInv * Vec3d(double(point.x), double(point.y), 1.0);
-    Mat worldCoord = trajectoryInv(Range(0, 3), Range(0, 3)) * (cameraCoord - trajectoryInv(Range(0,3), Range(3,4)));
-    return Point3f(worldCoord.at<double>(0), worldCoord.at<double>(1), worldCoord.at<double>(2));
-}
-
+// Depth reprojection of a given image
 vector<Vertex> imageTo3D(Mat& colorMap, Mat& depthMap, int depthShift, Mat&depthIntrinsicsInv, Mat& trajectoryInv){
     vector<Vertex> vertices = vector<Vertex>();
 
@@ -187,6 +177,7 @@ int main ( int argc, char** argv )
         save_bal(problem, "apt0.txt");
 
         BARemoveOutliersRelativ(problem);
+        balToMesh(problem, "apt0_triangulation.off");
 
         cout << "Solving the Bundle Adjustment Problem now..." << endl;
         solveBA(problem);

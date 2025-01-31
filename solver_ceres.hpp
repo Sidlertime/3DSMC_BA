@@ -82,7 +82,7 @@ void solveBA(BA_problem& bal){
     if(bal.dynamic_K){
         for (size_t i = 0; i < bal.num_observations; i++) {
             auto& obs = bal.observations[i];
-            if(bal.invalid_points[obs.point_index]) continue;   // outlier
+            if(bal.invalid_points[obs.point_index]) continue;   // outlier or invalid point
             auto& cam = bal.cameras[obs.camera_index];
             double* r = cam.R.data();
             double* t = cam.t.data();
@@ -96,7 +96,7 @@ void solveBA(BA_problem& bal){
         for (size_t i = 0; i < bal.num_observations; i++) {
             auto& obs = bal.observations[i];
             //cout << "Observation: " << i << " with camera: " << obs.camera_index << " point: " << obs.point_index << " at " << obs.x << ", " << obs.y << endl;
-            if(bal.invalid_points[obs.point_index]) continue;   // outlier
+            if(bal.invalid_points[obs.point_index]) continue;   // outlier or invalid point
             if(obs.camera_index >= bal.num_cameras){
                 cout << "PANIK with observation " << i << " has camera index " << obs.camera_index << endl;
             }
@@ -112,20 +112,18 @@ void solveBA(BA_problem& bal){
                 new ReprojectionErrorFixK(obs.x, obs.y, cam.f, cam.k1, cam.k2));
             problem.AddResidualBlock(cost_function, nullptr, r, t, point);
             //problem.SetParameterBlockConstant(r);
-            //problem.SetParameterBlockConstant(t);
+            problem.SetParameterBlockConstant(t);
         }
     }
 
     // Configure solver
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_SCHUR;
+    options.linear_solver_type = ceres::SPARSE_SCHUR;
     options.minimizer_progress_to_stdout = true;
-    options.max_num_iterations = 50;
+    options.max_num_iterations = 5;
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
 
     cout << summary.FullReport() << endl;
-
-    //balToMesh(bal, "bal_optimized.off");
 }
