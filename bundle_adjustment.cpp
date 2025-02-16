@@ -1,4 +1,5 @@
 #include <iostream>
+#include <string>
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -11,407 +12,175 @@
 #include <cmath>
 
 #include "dataloader_bf.hpp"
+#include "bf_preprocessor.hpp"
+#include "dataloader_bal.hpp"
+#include "mesh_utils.hpp"
+#include "solver_ceres.hpp"
+#include "src/sfm.hpp"
+#include "src/util/logging.hpp"
+#include "src/util/command_parser.hpp"
 
 using namespace std;
 using namespace cv;
 
-
-
-// struct ReprojectionError {
-//     ReprojectionError(const Point2f& observed_point, const Point3f& world_point)
-//         : observed_point_(observed_point), world_point_(world_point) {}
-
-//     template <typename T>
-//     bool operator()(const T* const camera_params, T* residuals) const {
-//         T predicted[2];
-//         T point[3] = {T(world_point_.x), T(world_point_.y), T(world_point_.z)};
-
-//         // Apply rotation (camera_params[0:2]) and translation (camera_params[3:5])
-//         T p[3];
-//         ceres::AngleAxisRotatePoint(camera_params, point, p);
-//         p[0] += camera_params[3];
-//         p[1] += camera_params[4];
-//         p[2] += camera_params[5];
-
-//         // Project to image plane
-//         predicted[0] = p[0] / p[2];
-//         predicted[1] = p[1] / p[2];
-
-//         // Compute residuals
-//         residuals[0] = predicted[0] - T(observed_point_.x);
-//         residuals[1] = predicted[1] - T(observed_point_.y);
-
-//         return true;
-//     }
-
-// private:
-//     const Point2f observed_point_;
-//     const Point3f world_point_;
-// };
-
-
-
-// Reprojection error cost function
-struct ReprojectionError {
-    ReprojectionError(double observed_x, double observed_y, double* K)
-        : observed_x(observed_x), observed_y(observed_y), K(K) {}
-
-    template <typename T>
-    bool operator()(const T* const camera, const T* const point, T* residuals) const {
-        // Extract rotation (angle-axis) and translation from the camera parameters
-        const T* rotation = camera;     // 3 params (angle-axis)
-        const T* translation = camera + 3; // 3 params (translation)
-
-        // Transform the 3D point into the camera coordinate system
-        T p[3];
-        ceres::AngleAxisRotatePoint(rotation, point, p);
-        // cout<<"---------------inside ceres rotated points are "<<p[0]<<" "<<p[1]<<" "<<p[2]<<"\n";
-        p[0] -= translation[0];
-        p[1] -= translation[1];
-        p[2] -= translation[2];
-
-        T result[3]; 
-        for (int i = 0; i < 3; ++i) {
-            result[i] = T(0);
-            for (int j = 0; j < 3; ++j) {
-                result[i] += K[i * 3 + j] * point[j];
-            }
-        }
-        // cout<<"---------------inside ceres result[0] size is "<<sizeof(result[0])<<"\n";
-        // cout<<"---------------inside ceres result points are "<<result[0]<<" "<<result[1]<<" "<<result[2]<<"\n";
-        // Project the 3D point into the image plane
-        T x_image = result[0]/result[2];
-        T y_image = result[1]/result[2];
-
-
-        // Compute residuals
-        residuals[0] = x_image - T(observed_x);
-        residuals[1] = y_image - T(observed_y);
-
-        return true;
-    }
-
-    // static ceres::CostFunction* Create(double observed_x, double observed_y) {
-    //     return new ceres::AutoDiffCostFunction<ReprojectionError, 2, 6, 3>(
-    //         new ReprojectionError(observed_x, observed_y, K));
-    // }
-
-private:
-    double observed_x, observed_y;
-    double* K;
+enum DATA_TYPE {
+    UNKNOWN = 0,
+    BAL = 1,
+    BF = 2,
+    GENERIC_SFM = 3,
 };
 
-double calculateL2Distance(const Point2f& point1, const Point2f& point2) {
-    double dx = point2.x - point1.x;
-    double dy = point2.y - point1.y;
-    return sqrt(dx * dx + dy * dy);
+const string _BAL = "bal", _BF = "bf", _SFM = "sfm";
+
+DATA_TYPE to_data_type(const string& in){
+    if (in.compare(_BAL) == 0) return DATA_TYPE::BAL;
+    if (in.compare(_BF) == 0) return DATA_TYPE::BF;
+    if (in.compare(_SFM) == 0) return DATA_TYPE::GENERIC_SFM;
+    return DATA_TYPE::UNKNOWN;
 }
 
-int main ( int argc, char** argv )
-{
-    google::InitGoogleLogging(argv[0]);
+void print_help_message(){
+    cout << "Data type is unknown or not given, please use the following: " << endl
+        << "./bundle_adjustment --type <'bal','bf'> --path <path> [options]" << endl
+        << "\t--type <type>,\t\tone of ['bal','bf'] (case sensitive)" << endl
+        << "\t--path <path>,\t\tpath to data-directory (Bundle Fusion) or to problem.txt (BAL)" << endl
+        << "\t--outliers <double>,\tfactor (mean distance) of outliers that should be removed when optimizing, default 2.0" << endl
+        << "\t--iterations <int>,\tmaximum number of iterations the solver should optimize"
+        << "\t--nimg <int>,\t\tnumber of images to load, default 10 (Bundle Fusion only)" << endl
+        << "\t--every <int>,\t\tloads every i-th image of the dataset, default 1 aka every image (Bundle Fusion only)" << endl
+        << "\t--matches <int>,\tlimit of matches that should be used for triangulation, default 20 (Bundle Fusion only)" << endl
+        << "\t--full-comparison,\tif used, all images are compaired against each other, default false (Bundle Fusion only)" << endl
+        << "\t--compare-window <int>,\tcompares each image to the n following images, default 1 (Bundle Fusion only)" << endl
+        << "\t--use-poses,\t\tif used, instead of pose estimation the given camera poses will be used (Bundle Fusion only)" << endl;
+}
 
-    //put images into ../Data/Bundle Fusion/<setName> where setName is i.e. office3
-    DataloaderBF loader = DataloaderBF();
-    loader.loadImages(argv[1], 10); // argv[1] contains the setname, might be generalized to a path in the future
-
-    for (int i = 0; i < loader.nImages; i++){
-        cout << "Camera Pose:\n" << loader.cameraPose[i].at<double>(0,0) << endl << loader.cameraPose[i] << endl << endl;
+int process_bal(InputParser& parser){
+    string path = parser.get_option("--path");
+    string outname = path;
+    if (path.find('/') != path.size()){
+        outname = path.substr(path.find_last_of('/') + 1);
+    }
+    double removal_scaling = 2.0;
+    if (parser.has_option("--outliers")){
+        removal_scaling = atof(parser.get_option("--outliers").c_str());
+    }
+    int iterations = 20;
+    if (parser.has_option("--iterations")){
+        iterations = atoi(parser.get_option("--iterations").c_str());
     }
 
-    vector<Mat> grays;
-    for(int i = 0; i < loader.nImages; i++){
-        Mat gray;
-        cvtColor(loader.imagesColor[i], gray, COLOR_BGR2GRAY);
-        grays.push_back(gray);
-    }
-
-    // SIFT feature detection
-    Ptr<SIFT> sift = SIFT::create();
-
-    vector<vector<KeyPoint>> keypoints;
-    vector<Mat> descriptors;
-    for(int i = 0; i < loader.nImages; i++){
-        vector<KeyPoint> kp;
-        Mat dc;
-        sift->detectAndCompute(grays[i], noArray(), kp, dc);
-
-        // Ensure descriptors are CV_32F
-        if(dc.type() != CV_32F){
-            dc.convertTo(dc, CV_32F);
-        }
-
-        keypoints.push_back(kp);
-        descriptors.push_back(dc);
-    }
-
-
-    Mat outimg1;
-    //drawKeypoints( img_1, keypoints_1, outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
-    drawKeypoints( loader.imagesColor[0], keypoints[0], outimg1, Scalar::all(-1), DrawMatchesFlags::DEFAULT );
-    imshow("SIFT_Keypoints",outimg1);
-
-    // Feature matching
-    BFMatcher matcher(NORM_L2);
-    vector<DMatch> matches;
-    //matcher.match(descriptors_1, descriptors_2, matches);
-    matcher.match(descriptors[0], descriptors[1], matches);
-
-
-
-   //-- Step 4: Filter matching point pairs
-    double min_dist=10000, max_dist=0;
-
-    //Find the minimum distance and maximum distance between all matches, that is, the distance between the most similar and the least similar two sets of points
-    for ( int i = 0; i < descriptors[0].rows; i++ )
-    {
-        double dist = matches[i].distance;
-        if ( dist < min_dist ) min_dist = dist;
-        if ( dist > max_dist ) max_dist = dist;
-    }
-
-    printf ( "-- Max dist : %f \n", max_dist );
-    printf ( "-- Min dist : %f \n", min_dist );
-
-    //When the distance between descriptors is greater than twice the minimum distance, the matching is considered incorrect. But sometimes the minimum distance will be very small, and an empirical value of 30 is set as the lower limit.
-    vector< DMatch > good_matches;
-    for ( int i = 0; i < descriptors[0].rows; i++ )
-    {
-        if ( matches[i].distance <= max ( 2*min_dist, 30.0 ) )
-        {
-            good_matches.push_back ( matches[i] );
-        }
-    }
-
-    cout<<"Number of good matches are "<<good_matches.size()<<endl;
-
-    //-- Step 5: Draw matching results
-    Mat img_match;
-    Mat img_goodmatch;
-    drawMatches ( loader.imagesColor[0], keypoints[0], loader.imagesColor[1], keypoints[1], matches, img_match );
-    drawMatches ( loader.imagesColor[0], keypoints[0], loader.imagesColor[1], keypoints[1], good_matches, img_goodmatch );
-    imshow ( "Match", img_match );
-    imshow ( "Good_Match", img_goodmatch );
-    waitKey(0);
-
-
-    sort(good_matches.begin(), good_matches.end(), [](const DMatch &a, const DMatch &b) {
-    return a.distance < b.distance;
-    });
-
-    vector<Point2f> points1, points2;
-
-    int num_points_added = 0;
-    int index = 0;
-
-    while (num_points_added < 8) { 
-
-        // int random_index = rand() % 20;
-        const auto& match = good_matches[index];
-        index++;
-
-        // Get the keypoints from the match
-        const KeyPoint& kp1 = keypoints[0][match.queryIdx];
-        const KeyPoint& kp2 = keypoints[0][match.trainIdx];
-
-        // points1.push_back(kp1.pt);
-        // points2.push_back(kp2.pt);
-
-        // // Print the coordinates of the matched keypoints
-        // cout << "Match " << i << ":\n";
-        // cout << "  Keypoint from Image 1: (" << kp1.pt.x << ", " << kp1.pt.y << ")\n";
-        // cout << "  Keypoint from Image 2: (" << kp2.pt.x << ", " << kp2.pt.y << ")\n";
-    
-
-        bool isFarEnough = true;
-        for (const auto& addedPoint : points1) {
-            if (calculateL2Distance(addedPoint, kp1.pt) <= 10.0) {
-                isFarEnough = false;
-                break;
-            }
-        }
-
-        // Add keypoints only if far enough
-        if (isFarEnough) {
-            points1.push_back(kp1.pt);
-            points2.push_back(kp2.pt);
-
-            // Print the coordinates of the matched keypoints
-            std::cout << "Match " << index << ":\n";
-            std::cout << "  Keypoint from Image 1: (" << kp1.pt.x << ", " << kp1.pt.y << ")\n";
-            std::cout << "  Keypoint from Image 2: (" << kp2.pt.x << ", " << kp2.pt.y << ")\n";
-
-            num_points_added++;
-        }
-   
-    }
-
-    // Draw points and numbers on image1
-    for (size_t i = 0; i < points1.size(); ++i) {
-        // Draw point
-        circle(loader.imagesColor[0], points1[i], 5, Scalar(0, 0, 255), -1); // Red dot
-
-        // Add number label
-        putText(loader.imagesColor[0], to_string(i + 1), points1[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
-    }
-
-    // Draw points and numbers on image2
-    for (size_t i = 0; i < points2.size(); ++i) {
-        // Draw point
-        circle(loader.imagesColor[1], points2[i], 5, Scalar(255, 0, 0), -1); // Blue dot
-
-        // Add number label
-        putText(loader.imagesColor[1], to_string(i + 1), points2[i] + Point2f(5, 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 0), 1);
-    }
-
-    // Display the images
-    imshow("Image 1 with Points", loader.imagesColor[0]);
-    imshow("Image 2 with Points", loader.imagesColor[1]);
-
-    // Wait for a key press and save the images if needed
-    waitKey(0);
-
-
-
-    // Intrinsics of Info.txt file in BundleFusion Dataaset
-    Mat K4 = Mat(4, 4, DataType<double>::type, &loader.info.calibrationColorIntrinsic);
-    cout << "Done with K4, first element: " << K4.at<double>(0,0) << endl;
-    //Mat K = (Mat_<double>(3, 3) << 582.871, 0, 320, 0, 582.871, 240, 0, 0, 1);
-    Mat K = K4(Range(0, 3), Range(0, 3));
-    cout << "Done with K (size " << K.size() << "), first element: " << K.at<double>(0,0) << endl;
-
-    //-- Step 6: // Compute the Fundamental and Essential Matrix using the 8-point algorithm
-    Mat F = findFundamentalMat(points1, points2, FM_8POINT);
-
-    cout << "Fundamental Matrix:\n" << F << endl;
-
-    // Compute the Essential Matrix: E = K'^T * F * K
-    Mat E = K.t() * F * K;
-
-    cout << "Essential Matrix:\n" << E << endl;
-
-    // // Decompose the Essential Matrix into R and t
-    // Mat R1, R2, t;
-    // decomposeEssentialMat(E, R1, R2, t);
-
-    // // Output the results
-    // cout << "Rotation Matrix R1:\n" << R1 << endl;
-    // cout << "Rotation Matrix R2:\n" << R2 << endl;
-    // cout << "Translation Vector t:\n" << t << endl;
-
-    //-- Step 7: Recover pose (R, t)
-    Mat R, t;
-    recoverPose(E, points1, points2, K, R, t);
-
-    cout << "Rotation Matrix R:\n" << R << endl;
-    cout << "Translation Vector t:\n" << t << endl;
-
-
-
-    // Vectors to hold matching points
-    vector<Point2f> all_points_1, all_points_2;
-
-    // Iterate through matches and extract corresponding points
-    for (const auto& match : good_matches) {
-        all_points_1.push_back(keypoints[0][match.queryIdx].pt); // Point from keypoints1
-        all_points_2.push_back(keypoints[1][match.trainIdx].pt); // Point from keypoints2
-    }
-
-
-
-    //-- Step 8: Generate 3D points via triangulation
-    Mat points4D;
-    triangulatePoints(K * Mat::eye(3, 4, CV_64F), K * (Mat_<double>(3, 4) << R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0),
-                                                          R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1),
-                                                          R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2)),
-                                                          all_points_1, all_points_2, points4D);
-
-
-
-
-    // Convert points to homogeneous coordinates
-    vector<Point3f> points3D;
-    for (int i = 0; i < points4D.cols; i++) {
-        Point3f pt(points4D.at<float>(0, i) / points4D.at<float>(3, i),
-                       points4D.at<float>(1, i) / points4D.at<float>(3, i),
-                       points4D.at<float>(2, i) / points4D.at<float>(3, i));
-        points3D.push_back(pt);
-    }
-
-
-    // Create a double array to store the matrix data
-    double rotation_params[9] = {R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2),
-                                R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2),
-                                R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2)};
-
-    double angle_axis[3];
-
-    // Convert the rotation matrix to angle-axis
-    ceres::RotationMatrixToAngleAxis(rotation_params, angle_axis);
-
-
-    // Initialize camera parameters for Ceres (rotation in angle-axis + translation)
-    // double camera_params[6] = {angle_axis[0], angle_axis[1], angle_axis[2], t.at<double>(0), t.at<double>(1), t.at<double>(2)};
-    double* camera_params = new double[6]; // Dynamically allocate memory for 6 elements
-
-    camera_params[0] = angle_axis[0];
-    camera_params[1] = angle_axis[1];
-    camera_params[2] = angle_axis[2];
-    camera_params[3] = t.at<double>(0);
-    camera_params[4] = t.at<double>(1);
-    camera_params[5] = t.at<double>(2);
-
-    double K_array[9];
-    for (int i = 0; i < K.rows; ++i) {
-        for (int j = 0; j < K.cols; ++j) {
-            K_array[i * K.cols + j] = K.at<double>(i, j);
-        }
-    }
-
-    //-- Step 9:  Setup Ceres problem
-
-    /*TODO: The current single optimizer for camera pose fails in the residual calculation. This needs to be debugged 
-    */
-    ceres::Problem problem;
-
-    for (size_t i = 0; i < points3D.size(); i++) {
-
-        ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionError, 2, 6, 3>(
-            new ReprojectionError(all_points_1[i].x, all_points_2[i].y, K_array));
-
-        // double point_3d[3] = {points3D[i].x, points3D[i].y, points3D[i].z};
-        double *point_3d = new double[3];
-        point_3d[0] = points3D[i].x;
-        point_3d[1] = points3D[i].y;
-        point_3d[2] = points3D[i].z;
-
-        problem.AddResidualBlock(cost_function, nullptr, camera_params, point_3d);
-    }
-
-    // Configure solver
-    ceres::Solver::Options options;
-    options.linear_solver_type = ceres::DENSE_SCHUR;
-    options.minimizer_progress_to_stdout = true;
-
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-
-    // Output results
-    cout << "Final Camera Parameters: ";
-    for (int i=0; i<6; i++) {
-        cout << camera_params[i] << " ";
-    }
-    cout << endl;
-
-    cout << summary.FullReport() << endl;
-
-
-    cv::Vec3d final_angle_axis(camera_params[0], camera_params[1], camera_params[2]);
-    cv::Mat rotation_matrix;
-    cv::Rodrigues( final_angle_axis, rotation_matrix);
-
-    // Display the rotation matrix
-    std::cout << "Rotation Matrix:\n" << rotation_matrix << std::endl;
-
+    BA_problem problem = BA_problem();
+    load_bal(path, problem);
+    int removed = BARemoveOutliersRelativ(problem, removal_scaling);
+    cout << "Removed " << removed << " Outliers before optimization" << endl;
+    balToMesh(problem, outname + "_unoptimized.off");
+
+    cout << "Solving the Bundle Adjustment Problem now..." << endl;
+    solveBA(problem, iterations);
+    cout << "Successfully solved the Bundle Adjustment Problem" << endl;
+
+    removed = BARemoveOutliersRelativ(problem, removal_scaling * 0.9);
+    cout << "Removed " << removed << " Outliers after optimization" << endl;
+    balToMesh(problem, outname + "_optimized.off", false, false);
     return 0;
+}
+
+int process_bf(InputParser& parser){
+    string path = parser.get_option("--path");
+    string outname = path;
+    if (path.find('/') != path.size()){
+        outname = path.substr(path.find_last_of('/') + 1);
+    }
+    int img_count = 20;
+    if (parser.has_option("--nimg")){
+        img_count = atoi(parser.get_option("--nimg").c_str());
+    }
+    int load_every = 1;
+    if (parser.has_option("--every")){
+        load_every = atoi(parser.get_option("--every").c_str());
+    }
+    int max_matches = 20;
+    if (parser.has_option("--matches")){
+        max_matches = atoi(parser.get_option("--matches").c_str());
+    }
+    bool full_comparison = false;
+    if (parser.has_option("--full-comparison")){
+        full_comparison = true;
+    }
+    int comparison_window = 1;
+    if (parser.has_option("--compare-window")){
+        comparison_window = atoi(parser.get_option("--compare-window").c_str());
+    }
+    bool use_ref_extrinsics = false;
+    if (parser.has_option("--use-poses")){
+        use_ref_extrinsics = true;
+    }
+    double removal_scaling = 2.0;
+    if (parser.has_option("--outliers")){
+        removal_scaling = atof(parser.get_option("--outliers").c_str());
+    }
+    int iterations = 20;
+    if (parser.has_option("--iterations")){
+        iterations = atoi(parser.get_option("--iterations").c_str());
+    }
+
+    DataloaderBF loader = DataloaderBF();
+    loader.loadImages(path, img_count, load_every);
+
+    SFM_params params = SFM_params{
+        .images = loader.imagesColor,
+        .focal = (float) loader.info.calibrationColorIntrinsic[0] * 1.0F,
+        .width = loader.info.colorWidth,
+        .height = loader.info.colorHeight,
+        .full_comparison = full_comparison,
+        .comparison_window = comparison_window,
+        .use_ref_extrinsics = use_ref_extrinsics,
+        .ref_extrinsics = loader.cameraPose,
+        .match_limit = max_matches,
+    };
+    BA_problem problem = sfm_pipeline(params);
+
+    cout << "Successfully processed Bundle Fusion set " << path << " with " << problem.num_observations << " Observations" << endl;
+    save_bal(problem, outname + "_problem.txt");
+
+    int removed = BARemoveOutliersRelativ(problem, removal_scaling);
+    cout << "Removed " << removed << " Outliers before optimization" << endl;
+    balToMesh(problem, outname + "_unoptimized.off");
+
+    cout << "Solving the Bundle Adjustment Problem now..." << endl;
+    solveBA(problem, iterations);
+    cout << "Successfully solved the Bundle Adjustment Problem" << endl;
+
+    removed = BARemoveOutliersRelativ(problem, removal_scaling * 0.9);
+    cout << "Removed " << removed << " Outliers after optimization" << endl;
+    balToMesh(problem, outname + "_optimized.off");
+    return 0;
+}
+
+int main ( int argc, char** argv ){
+    google::InitGoogleLogging(argv[0]);
+    InputParser parser(argc, argv);
+
+    DATA_TYPE data_type = DATA_TYPE::UNKNOWN;
+    if (parser.has_option("--type")){
+        data_type = to_data_type(parser.get_option("--type"));
+    }
+
+    switch (data_type)
+    {
+    case BAL:
+        // do bal only
+        cout << "BAL" << endl;
+        return process_bal(parser);
+    case BF:
+        // do sfm on bf dataset
+        cout << "BF" << endl;
+        return process_bf(parser);
+    default:
+        // not implemented or unknown
+        print_help_message();
+        break;
+    }
+
+    return 1;
 }

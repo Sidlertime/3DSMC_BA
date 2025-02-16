@@ -45,11 +45,17 @@ public:
     vector<Mat> imagesColor;
     vector<Mat> imagesDepth;
     vector<Mat> cameraPose;
+    Mat colorIntrinsic;
+    Mat colorExtrinsic;
+    Mat depthIntrinsic;
+    Mat depthExtrinsic;
 
     DataloaderBF();
     ~DataloaderBF();
 
-    bool loadImages(string name, int number);
+    bool loadImages(string name, int number, int every);
+    Mat getColorIntrinsic();
+    Mat getDepthIntrinsic();
 };
 
 DataloaderBF::DataloaderBF(){
@@ -59,6 +65,10 @@ DataloaderBF::DataloaderBF(){
     imagesColor = vector<Mat>();
     imagesDepth = vector<Mat>();
     cameraPose = vector<Mat>();
+    colorExtrinsic = Mat(4, 4, CV_64F, &info.calibrationColorExtrinsic);
+    colorIntrinsic = Mat(4, 4, CV_64F, &info.calibrationColorIntrinsic);
+    depthExtrinsic = Mat(4, 4, CV_64F, &info.calibrationDepthExtrinsic);
+    depthIntrinsic = Mat(4, 4, CV_64F, &info.calibrationDepthIntrinsic);
 }
 
 DataloaderBF::~DataloaderBF(){
@@ -167,8 +177,8 @@ string DataloaderBF::toFrameName(int number){
     return FRAME_PREFIX + ss.str();
 }
 
-bool DataloaderBF::loadImages(string setName, int number = -1){
-    name = (string)BF_PATH + setName;
+bool DataloaderBF::loadImages(string setName, int number = -1, int every = 1){
+    name = setName;
 
     // Read info.txt file
     if(!readInfo(name + "/info.txt")){
@@ -180,15 +190,24 @@ bool DataloaderBF::loadImages(string setName, int number = -1){
     nImages = min(number, info.framesSize);
 
     // read images
-    for (int i = 0; i < nImages; i++){
-        string frame = toFrameName(i);
+    for (int i = 0; i < nImages; i ++){
+        string frame = toFrameName(i * every);
         imagesColor.push_back(imread(name + frame + COLOR_SUFFIX));
-        imagesDepth.push_back(imread(name + frame + DEPTH_SUFFIX));
+        imagesDepth.push_back(imread(name + frame + DEPTH_SUFFIX, IMREAD_GRAYSCALE));
         cameraPose.push_back(readPose(name + frame + POSE_SUFFIX));
     }
 
     cout << "Succesfully loaded set " << setName << " with " << nImages << " Images" << endl;
 
     return true;
+}
+
+
+Mat DataloaderBF::getColorIntrinsic(){
+    return colorIntrinsic;
+}
+
+Mat DataloaderBF::getDepthIntrinsic(){
+    return depthIntrinsic;
 }
 
