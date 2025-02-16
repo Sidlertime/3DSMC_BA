@@ -1,7 +1,5 @@
 #pragma once
 
-#include <optional>
-
 #include "ceres/ceres.h"
 #include "Eigen"
 
@@ -9,8 +7,8 @@
 #include "dataloader_bf.hpp"
 #include "mesh_utils.hpp"
 
-struct ReprojectionErrorDynK {
-    ReprojectionErrorDynK(double observed_x, double observed_y)
+struct ReprojectionErrorBAL {
+    ReprojectionErrorBAL(double observed_x, double observed_y)
         : observed_x(observed_x), observed_y(observed_y) {}
 
     template <typename T>
@@ -23,8 +21,8 @@ struct ReprojectionErrorDynK {
         p[2] += t[2];
 
         // Perspective division
-        T x_image = p[0] / p[2];
-        T y_image = p[1] / p[2];
+        T x_image = -p[0] / p[2];
+        T y_image = -p[1] / p[2];
 
         // Conversion to pixel coordinates
         T sqrnorm = x_image * x_image + y_image * y_image;
@@ -44,8 +42,8 @@ private:
 };
 
 struct ReprojectionErrorFixK {
-    ReprojectionErrorFixK(double observed_x, double observed_y, double f, double k1, double k2)
-        : observed_x(observed_x), observed_y(observed_y), f(f), k1(k1), k2(k2) {}
+    ReprojectionErrorFixK(double observed_x, double observed_y, double f, double cx, double cy)
+        : observed_x(observed_x), observed_y(observed_y), f(f), cx(cx), cy(cy) {}
 
     template <typename T>
     bool operator()(const T* const R, const T* t, const T* const point, T* residuals) const {
@@ -57,13 +55,14 @@ struct ReprojectionErrorFixK {
         p[2] += t[2];
 
         // Perspective division
-        p[0] = p[0] / p[2];
-        p[1] = p[1] / p[2];
-        p[2] = T(1.0);
+        //p[0] = p[0] / p[2];
+        //p[1] = p[1] / p[2];
 
         // Conversion to pixel coordinates
-        T x_image = T(f) * p[0] + T(k1);
-        T y_image = T(f) * p[1] + T(k2);
+        //T x_image = T(f) * p[0] + T(cx);
+        //T y_image = T(f) * p[1] + T(cy);
+        T x_image = T(f) * p[0] / p[2] + T(cx);
+        T y_image = T(f) * p[1] / p[2] + T(cy);
 
         // Compute residuals
         residuals[0] = x_image - T(observed_x);
@@ -73,10 +72,10 @@ struct ReprojectionErrorFixK {
     }
 
 private:
-    double observed_x, observed_y, f, k1, k2;
+    double observed_x, observed_y, f, cx, cy;
 };
 
-void solveBA(BA_problem& bal){
+void solveBA(BA_problem& bal, const int iterations = 20){
     ceres::Problem problem;
 
     if(bal.dynamic_K){
@@ -88,8 +87,8 @@ void solveBA(BA_problem& bal){
             double* t = cam.t.data();
             double* point = bal.points[obs.point_index].data();
 
-            ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionErrorDynK, 2, 3, 3, 3, 1, 1, 1>(
-                new ReprojectionErrorDynK(obs.x, obs.y));
+            ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionErrorBAL, 2, 3, 3, 3, 1, 1, 1>(
+                new ReprojectionErrorBAL(obs.x, obs.y));
             problem.AddResidualBlock(cost_function, nullptr, r, t, point, &cam.f, &cam.k1, &cam.k2);
         }
     } else {
@@ -108,19 +107,36 @@ void solveBA(BA_problem& bal){
             }
             double* point = bal.points[obs.point_index].data();
 
+            if(!cam.R.allFinite()){
+                cout << "Invalid Rotation of Camera: " << obs.camera_index << endl;
+                continue;
+            }
+            if(!cam.t.allFinite()){
+                cout << "Invalid Traslation of Camera: " << obs.camera_index << endl;
+                continue;
+            }
+            if(!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])){
+                cout << "Invalid Point: " << obs.point_index << " (in image " << obs.camera_index << ")" << endl;
+                continue;
+            }
+
             ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<ReprojectionErrorFixK, 2, 3, 3, 3>(
-                new ReprojectionErrorFixK(obs.x, obs.y, cam.f, cam.k1, cam.k2));
+                new ReprojectionErrorFixK(obs.x, obs.y, cam.f, cam.cx, cam.cy));
             problem.AddResidualBlock(cost_function, nullptr, r, t, point);
-            //problem.SetParameterBlockConstant(r);
-            problem.SetParameterBlockConstant(t);
+
+            // set first camera constant for better stability
+            if(obs.camera_index == 0){
+                problem.SetParameterBlockConstant(r);
+                problem.SetParameterBlockConstant(t);
+            }
         }
     }
 
     // Configure solver
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::SPARSE_SCHUR;
+    options.linear_solver_type = ceres::DENSE_SCHUR;
     options.minimizer_progress_to_stdout = true;
-    options.max_num_iterations = 5;
+    options.max_num_iterations = iterations;
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);

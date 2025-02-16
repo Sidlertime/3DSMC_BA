@@ -18,6 +18,8 @@ struct Camera {
     double f;
     double k1;
     double k2;
+    double cx;
+    double cy;
 };
 
 struct BA_problem {
@@ -29,14 +31,17 @@ struct BA_problem {
     Camera* cameras;
     Eigen::Vector3d* points;
     bool* invalid_points;
+    Eigen::Vector3i* colors;
 
-    BA_problem() : num_cameras(0), num_points(0), num_observations(0), dynamic_K(false), observations(NULL), cameras(NULL), points(NULL), invalid_points(NULL){}
+    BA_problem() : num_cameras(0), num_points(0), num_observations(0), dynamic_K(false), 
+        observations(NULL), cameras(NULL), points(NULL), invalid_points(NULL), colors(NULL) {}
 
     ~BA_problem(){
         if (observations != NULL) delete[] observations;
         if (cameras != NULL) delete[] cameras;
         if (points != NULL) delete[] points;
         if (invalid_points != NULL) delete[] invalid_points;
+        if (colors != NULL) delete[] colors;
     }
 };
 

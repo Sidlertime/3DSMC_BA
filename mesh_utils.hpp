@@ -81,7 +81,7 @@ bool pointsToMesh(vector<Point3f> points, vector<Point3f> cameraPositions, const
     return true;
 }
 
-bool balToMesh(BA_problem& bal, const string& filename = "mesh_out.off"){
+bool balToMesh(BA_problem& bal, const string& filename = "mesh_out.off", bool draw_cams = true, bool draw_cam_direction = true){
     cout << "Writing mesh " << filename << endl;
 
     ofstream outFile(filename);
@@ -92,13 +92,15 @@ bool balToMesh(BA_problem& bal, const string& filename = "mesh_out.off"){
 
 	outFile << "# numVertices numFaces numEdges" << endl;
 
-	outFile << bal.num_points + bal.num_cameras << " 0 0" << endl;
+	outFile << bal.num_points + (draw_cams ? bal.num_cameras : 0) + (draw_cam_direction ? bal.num_cameras : 0) << " 0 0" << endl;
 
     for (int i = 0; i < bal.num_points; i++){
         auto& p = bal.points[i];
-        if(isfinite(p.x()) && isfinite(p.y()) && isfinite(p.z())){
+        Eigen::Vector3i c(0, 0, 0);
+        if (bal.colors != NULL) c = bal.colors[i];
+        if(p.allFinite()){
             // Point coordinates in color Black
-            outFile << p.x() << " " << p.y() << " " << p.z() << " 0 0 0 0" << endl;
+            outFile << p.x() << " " << p.y() << " " << p.z() << " " << c.x() << " " << c.y() << " " << c.z() << " 0" << endl;
         } else {
             outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
         }
@@ -106,11 +108,29 @@ bool balToMesh(BA_problem& bal, const string& filename = "mesh_out.off"){
 
     for (int i = 0; i < bal.num_cameras; i++){
         auto& c = bal.cameras[i];
-        if(isfinite(c.t.x()) && isfinite(c.t.y()) && isfinite(c.t.z())){
-            // Camera coordinates in color Red
-            outFile << c.t.x() << " " << c.t.y() << " " << c.t.z() << " 255 0 0 0" << endl;
-        } else {
-            outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
+        Eigen::Matrix3d rot;
+        ceres::AngleAxisToRotationMatrix(c.R.data(), rot.data());
+        Eigen::Vector3d origin = - (rot.transpose() * c.t);
+
+        if (draw_cams){
+            if(origin.allFinite()){
+                // Camera coordinates in color Red
+                outFile << origin.x() << " " << origin.y() << " " << origin.z() << " 255 0 0 0" << endl;
+            } else {
+                outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
+            }
+        }
+
+        // also add a point 1 unit infront of the cameras direction
+        if (draw_cam_direction){
+            Eigen::Vector3d unit(0, 0, 1);
+            unit = rot.transpose() * (unit - c.t);
+            if(unit.allFinite()){
+                // Camera coordinates in color Red
+                outFile << unit.x() << " " << unit.y() << " " << unit.z() << " 0 255 0 0" << endl;
+            } else {
+                outFile << "0.0 0.0 0.0 0 0 0 0" << endl;
+            }
         }
     }
 

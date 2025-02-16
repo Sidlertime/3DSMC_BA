@@ -85,9 +85,14 @@ bool save_bal(const BA_problem& p, const string filename = "bal.txt"){
             << cam.t.x() << endl
             << cam.t.y() << endl
             << cam.t.z() << endl
-            << cam.f << endl
-            << cam.k1 << endl
+            << cam.f << endl;
+        if(p.dynamic_K){
+            outfile << cam.k1 << endl
             << cam.k2 << endl;
+        } else {
+            outfile << cam.cx << endl
+            << cam.cy << endl;
+        }
     }
 
     for(int i = 0; i < p.num_points; i++){

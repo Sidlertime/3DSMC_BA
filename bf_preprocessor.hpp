@@ -16,22 +16,96 @@ Point3f groundTruthPoint(Point2f& point, Mat& depthMap, int depthShift, Mat& dep
     return Point3f(worldCoord.at<double>(0), worldCoord.at<double>(1), worldCoord.at<double>(2));
 }
 
+
+// Matches Features of 2 Points
+void matchFetures(const Mat& img1, const Mat& img2, vector<KeyPoint>& keypoints1, vector<KeyPoint>& keypoints2, vector<DMatch>& good_matches){
+    Ptr<SIFT> sift = SIFT::create();
+    Mat descriptors1, descriptors2;
+    
+    sift->detectAndCompute(img1, noArray(), keypoints1, descriptors1);
+    sift->detectAndCompute(img2, noArray(), keypoints2, descriptors2);
+    
+    BFMatcher matcher(NORM_L2);
+    vector<DMatch> matches;
+    matcher.match(descriptors1, descriptors2, matches);
+    
+    // arbitrary distance that works good, TODO: check 100 vs 30
+    double min_dist = 100;
+    for (auto& m : matches) {
+        if (m.distance < min_dist) min_dist = m.distance;
+    }
+    
+    for (auto& m : matches) {
+        if (m.distance < 3 * min_dist) {
+            good_matches.push_back(m);
+        }
+    }
+}
+
+// Recover Camera Pose and triangulate the 3D points
+void recoverCameraPosePoints(const vector<KeyPoint>& keypoints1, 
+    const vector<KeyPoint>& keypoints2, 
+    const vector<DMatch>& matches,
+    const Mat& R_ref,
+    const Mat& t_ref,
+    Mat& R, 
+    Mat& t, 
+    vector<Point3f>& points3D, 
+    vector<Point2f>& observations, 
+    vector<int>& point_indices, 
+    int camera_index){
+        vector<Point2f> pts1, pts2;
+        for (auto& match : matches) {
+            pts1.push_back(keypoints1[match.queryIdx].pt);
+            pts2.push_back(keypoints2[match.trainIdx].pt);
+        }
+        
+        Mat E = findEssentialMat(pts1, pts2, 500.0, Point2d(320, 240), RANSAC);
+        recoverPose(E, pts1, pts2, R, t);
+        
+        Mat P1 = Mat::eye(3, 4, CV_64F);
+        R_ref.copyTo(P1(Range(0, 3), Range(0, 3)));
+        t_ref.copyTo(P1.col(3));
+        Mat P2(3, 4, CV_64F);
+        R = R_ref * R;
+        R.copyTo(P2(Range(0, 3), Range(0, 3)));
+        t = t_ref + t;
+        t.copyTo(P2.col(3));
+        
+        Mat points4D;
+        triangulatePoints(P1, P2, pts1, pts2, points4D);
+        
+        for (int i = 0; i < points4D.cols; i++) {
+            Point3f pt;
+            pt.x = points4D.at<float>(0, i) / points4D.at<float>(3, i);
+            pt.y = points4D.at<float>(1, i) / points4D.at<float>(3, i);
+            pt.z = points4D.at<float>(2, i) / points4D.at<float>(3, i);
+            points3D.push_back(pt);
+            
+            observations.push_back(pts2[i]);
+            point_indices.push_back(points3D.size() - 1);
+        }
+}
+
 // Calculate Observations and initial Camera Position/Rotation and Point Positions for solving the BA
-BA_problem processBFSet(DataloaderBF& loader){
+BA_problem processBFSet(DataloaderBF& loader, const bool full_comparison = false){
 
     // SIFT
     cout << "Calculating keypoints and descriptors..." << endl;
 
     vector<Mat> grays;
+    grays.resize(loader.nImages);
 
     Ptr<SIFT> sift = SIFT::create();
 
     vector<vector<KeyPoint>> keypoints;
+    keypoints.resize(loader.nImages);
     vector<Mat> descriptors;
+    descriptors.resize(loader.nImages);
     for(int i = 0; i < loader.nImages; i++){
         Mat gray = Mat();
         cvtColor(loader.imagesColor[i], gray, COLOR_BGR2GRAY);
-        grays.push_back(gray);
+        grays[i] = gray;
 
         vector<KeyPoint> kp = vector<KeyPoint>();
         Mat dc = Mat();
@@ -43,8 +117,8 @@ BA_problem processBFSet(DataloaderBF& loader){
             dc.convertTo(dc, CV_32F);
         }
 
-        keypoints.push_back(kp);
-        descriptors.push_back(dc);
+        keypoints[i] = kp;
+        descriptors[i] = dc;
     }
 
     cout << "Finished calculating keypoints and descriptors..." << endl;
@@ -70,6 +144,8 @@ BA_problem processBFSet(DataloaderBF& loader){
         cout << "Comparing Image " << m << " to all others..." << endl;
         int doubles = 0;
         for (int n = m + 1; n < loader.nImages; n++){
+            if(!full_comparison && n != m + 1) break;
+
             // Feature matching
             matches.clear();
             matcher.match(descriptors[m], descriptors[n], matches);
@@ -141,7 +217,7 @@ BA_problem processBFSet(DataloaderBF& loader){
             // no new points to triangulate
             if(points_1.size() == 0) continue;
 
-            /* Generate 3D points via triangulation 
+            /* Generate 3D points via triangulation */
             Mat points4D;
             Mat T_m_float, T_n_float;
             //loader.cameraPose[m].convertTo(T_m_float, CV_32F);
@@ -153,8 +229,10 @@ BA_problem processBFSet(DataloaderBF& loader){
             //undistortPoints(points_1, undistorted_1, K_float, Vec4d(0, 0, 0, 0));
             //undistortPoints(points_2, undistorted_2, K_float, Vec4d(0, 0, 0, 0));
 
-            triangulatePoints(K_float * T_m_float.inv()(Range(0, 3), Range(0, 4)), 
-                    K_float * T_n_float.inv()(Range(0, 3), Range(0, 4)), points_1, points_2, points4D);
+            //triangulatePoints(K_float * T_m_float.inv()(Range(0, 3), Range(0, 4)), 
+            //        K_float * T_n_float.inv()(Range(0, 3), Range(0, 4)), points_1, points_2, points4D);
+            triangulatePoints(T_m_float.inv()(Range(0, 3), Range(0, 4)), 
+                    T_n_float.inv()(Range(0, 3), Range(0, 4)), points_1, points_2, points4D);
             //triangulatePoints(T_m_float(Range(0, 3), Range(0, 4)), 
             //        T_n_float(Range(0, 3), Range(0, 4)), undistorted_1, undistorted_2, points4D);
             
@@ -166,7 +244,7 @@ BA_problem processBFSet(DataloaderBF& loader){
                             points4D.at<float>(1, i) / points4D.at<float>(3, i),
                             points4D.at<float>(2, i) / points4D.at<float>(3, i));
                 points3D.push_back(pt);
-            }*/
+            }
 
             /* Using "ground truth" as initial value */
             for(int i = 0; i < points_1.size(); i++){
@@ -199,8 +277,8 @@ BA_problem processBFSet(DataloaderBF& loader){
         c.R = Eigen::Vector3d(R.at<double>(0), R.at<double>(1), R.at<double>(2));
         c.t = Eigen::Vector3d(c_p.at<double>(0, 3), c_p.at<double>(1, 3), c_p.at<double>(2, 3));
         c.f = loader.colorIntrinsic.at<double>(0,0);
-        c.k1 = loader.colorIntrinsic.at<double>(0,2);
-        c.k2 = loader.colorIntrinsic.at<double>(1,2);
+        c.cx = loader.colorIntrinsic.at<double>(0,2);
+        c.cy = loader.colorIntrinsic.at<double>(1,2);
         //cout << "Camera Pose:\n" << c_p << endl;
         //cout << "Camera: " << i << " with Rotation: " << c.R << " and Translation: " << c.t << endl;
     }

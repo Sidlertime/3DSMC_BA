@@ -178,7 +178,7 @@ string DataloaderBF::toFrameName(int number){
 }
 
 bool DataloaderBF::loadImages(string setName, int number = -1, int every = 1){
-    name = (string)BF_PATH + setName;
+    name = setName;
 
     // Read info.txt file
     if(!readInfo(name + "/info.txt")){
